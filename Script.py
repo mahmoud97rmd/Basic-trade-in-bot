@@ -11,7 +11,7 @@ from aiohttp import web
 METAAPI_TOKEN = 'eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9.eyJfaWQiOiJjM2M1MWFlYjY3N2MwNzlkMmUzOTA3YjAzYmYzNzc4YiIsImFjY2Vzc1J1bGVzIjpbeyJpZCI6InRyYWRpbmctYWNjb3VudC1tYW5hZ2VtZW50LWFwaSIsIm1ldGhvZHMiOlsidHJhZGluZy1hY2NvdW50LW1hbmFnZW1lbnQtYXBpOnJlc3Q6cHVibGljOio6KiJdLCJyb2xlcyI6WyJyZWFkZXIiLCJ3cml0ZXIiXSwicmVzb3VyY2VzIjpbIio6JFVTRVJfSUQkOioiXX0seyJpZCI6Im1ldGFhcGktcmVzdC1hcGkiLCJtZXRob2RzIjpbIm1ldGFhcGktYXBpOnJlc3Q6cHVibGljOio6KiJdLCJyb2xlcyI6WyJyZWFkZXIiLCJ3cml0ZXIiXSwicmVzb3VyY2VzIjpbIio6JFVTRVJfSUQkOioiXX0seyJpZCI6Im1ldGFhcGktcnBjLWFwaSIsIm1ldGhvZHMiOlsibWV0YWFwaS1hcGk6d3M6cHVibGljOio6KiJdLCJyb2xlcyI6WyJyZWFkZXIiLCJ3cml0ZXIiXSwicmVzb3VyY2VzIjpbIio6JFVTRVJfSUQkOioiXX0seyJpZCI6Im1ldGFhcGktcmVhbC10aW1lLXN0cmVhbWluZy1hcGkiLCJtZXRob2RzIjpbIm1ldGFhcGktYXBpOndzOnB1YmxpYzoqOioiXSwicm9sZXMiOlsicmVhZGVyIiwid3JpdGVyIl0sInJlc291cmNlcyI6WyIqOiRVU0VSX0lEJDoqIl19LHsiaWQiOiJtZXRhc3RhdHMtYXBpIiwibWV0aG9kcyI6WyJtZXRhc3RhdHMtYXBpOnJlc3Q6cHVibGljOio6KiJdLCJyb2xlcyI6WyJyZWFkZXIiLCJ3cml0ZXIiXSwicmVzb3VyY2VzIjpbIio6JFVTRVJfSUQkOioiXX0seyJpZCI6InJpc2stbWFuYWdlbWVudC1hcGkiLCJtZXRob2RzIjpbInJpc2stbWFuYWdlbWVudC1hcGk6cmVzdDpwdWJsaWM6KjoqIl0sInJvbGVzIjpbInJlYWRlciIsIndyaXRlciJdLCJyZXNvdXJjZXMiOlsiKjokVVNFUl9JRCQ6KiJdfSx7ImlkIjoiY29weWZhY3RvcnktYXBpIiwibWV0aG9kcyI6WyJjb3B5ZmFjdG9yeS1hcGk6cmVzdDpwdWJsaWM6KjoqIl0sInJvbGVzIjpbInJlYWRlciIsIndyaXRlciJdLCJyZXNvdXJjZXMiOlsiKjokVVNFUl9JRCQ6KiJdfSx7ImlkIjoibXQtbWFuYWdlci1hcGkiLCJtZXRob2RzIjpbIm10LW1hbmFnZXItYXBpOnJlc3Q6ZGVhbGluZzoqOioiLCJtdC1tYW5hZ2VyLWFwaTpyZXN0OnB1YmxpYzoqOioiXSwicm9sZXMiOlsicmVhZGVyIiwid3JpdGVyIl0sInJlc291cmNlcyI6WyIqOiRVU0VSX0lEJDoqIl19LHsiaWQiOiJiaWxsaW5nLWFwaSIsIm1ldGhvZHMiOlsiYmlsbGluZy1hcGk6cmVzdDpwdWJsaWM6KjoqIl0sInJvbGVzIjpbInJlYWRlciJdLCJyZXNvdXJjZXMiOlsiKjokVVNFUl9JRCQ6KiJdfV0sImlnbm9yZVJhdGVMaW1pdHMiOmZhbHNlLCJ0b2tlbklkIjoiMjAyMTAyMTMiLCJpbXBlcnNvbmF0ZWQiOmZhbHNlLCJyZWFsVXNlcklkIjoiYzNjNTFhZWI2NzdjMDc5ZDJlMzkwN2IwM2JmMzc3OGIiLCJpYXQiOjE3Nzg3NDY0MzgsImV4cCI6MTc4NjUyMjQzOH0.NRMo-BO9ezZBEb4XmCQzkMsRN1iAz1rVSk7XWFP-ZGS_AZEyxSfIjnJ5w-r4egazV7tnxNLjjMuAdUb25T3ur3XWKCL4Jo9LFPy9tZzhIMRtlhq8d6YAHK9uxJclqJv5BZQFDeMeiFtyalLNjaE100Lp2zEnGWwlloxF-dpCw5DXvVKeGfMyVx4L2kisshcysDo7OeMkDBU1UB7leHi2eviEl7XQCpmhxdzT4BwMkf8YERx2jouKVu8-koVy00aon0drktGBSlQDOFw2WV0hg-VUfeCBR_Hgw2czqKVJ_lj_ZN3EsjWirirpiuXWbtwdD-VPokjKtX1z3ugcSTS1nd2iFIzauUHdOfb7Jl0R6cm8FosVS-4Iu046DiMsrxiAJ4PBywOXQhsFzZiePqmil1w5HHCxrw_78HNR9XcjBETMpHx9W48llIeUOkBVbsKfBP5iYtGSjS52i0QgpvHkfKrtXfbkMT0_9yJFG2kfZJHwJ5BJzWT4aKXto3l6iGe45xe4ZJhYhZX_RkC6dxR2w84M-uY-wlqiv_sxjHNOguSyOx4lfaeoq5H-LuJiWpHAYxEJUQWoQAQ7PObZOXCDWLRc_vP2gcbv1qYxTjD54FHnqhyf-oTGzAkWG5CVQFKpp9jTHQ3pXEYTSgIUTfHDbtoesAY1HG3nHcHbwujnqo0'
 ACCOUNT_ID = '7d54fa6f-eaf7-4637-92a1-e0356ee729f8'
 TG_TOKEN = '8647261254:AAH7AyzhBYvc9QjGmzgFW7NBb0a_SOAYCjc'
-OANDA_ID = '101-004-28533521-001'
+OANDA_ID = '101-004-28533521-003'
 OANDA_API = 'c0f5b5df69c77e8bf35dcfd2fbde72da-a4c6cbadba7ae39d21143f65e2c2b8ba'
 OANDA_URL = 'https://api-fxpractice.oanda.com/v3'
 
@@ -211,7 +211,7 @@ def get_settings_keyboard():
     ]}
 
 # --- 🚀 BACKTEST ENGINE 🚀 ---
-async def run_oanda_backtest(start_dt):
+async def run_oanda_backtest(start_dt, end_dt=None):
     if bot_state['is_backtesting']:
         await send_tg_msg("⚠️ يوجد باك تيست قيد المعالجة حالياً.")
         return
@@ -222,7 +222,8 @@ async def run_oanda_backtest(start_dt):
     trade_logs = []
     total_prof, peak_equity, max_dd, be_count = 0.0, 0.0, 0.0, 0
     
-    await send_tg_msg(f"⏳ <b>بدء الباك تيست</b>\nمن: {start_dt.strftime('%Y-%m-%d')}")
+    msg_dt = f"من: {start_dt.strftime('%Y-%m-%d')}" + (f" إلى: {end_dt.strftime('%Y-%m-%d')}" if end_dt else "")
+    await send_tg_msg(f"⏳ <b>بدء الباك تيست</b>\n{msg_dt}")
     
     try:
         for tf in bot_state['timeframes']:
@@ -234,7 +235,8 @@ async def run_oanda_backtest(start_dt):
             
             safe_start_idx = max(3, bot_state['cons_count'])
             
-            for i in df[df['time'] >= start_dt].index:
+            mask = (df['time'] >= start_dt) & (df['time'] <= end_dt) if end_dt else (df['time'] >= start_dt)
+            for i in df[mask].index:
                 if i < safe_start_idx: continue 
                 
                 curr, prev = df.loc[i], df.loc[i-1]
@@ -441,10 +443,11 @@ async def process_tg_update(update):
                 await send_tg_msg("✅ تم التحديث")
         elif msg.startswith('/backtest'):
             try: 
-                date_str = msg.split()[1]
-                st = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-                asyncio.create_task(run_oanda_backtest(st))
-            except: await send_tg_msg("⚠️ استخدم: /backtest YYYY-MM-DD")
+                parts = msg.split()
+                st = datetime.strptime(parts[1], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                ed = datetime.strptime(parts[2], "%Y-%m-%d").replace(tzinfo=timezone.utc) if len(parts) > 2 else None
+                asyncio.create_task(run_oanda_backtest(st, ed))
+            except: await send_tg_msg("⚠️ استخدم: /backtest YYYY-MM-DD [YYYY-MM-DD]")
 
     elif 'callback_query' in update:
         q = update['callback_query']
@@ -563,3 +566,4 @@ async def main():
 
 if __name__ == "__main__": 
     asyncio.run(main())
+
