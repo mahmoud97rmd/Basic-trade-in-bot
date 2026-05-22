@@ -243,7 +243,11 @@ async def run_oanda_backtest(start_dt, mode='candle'):
                 sell_sig = sell_deep_valid or sell_mid_valid or sell_shal_valid
                 
                 if buy_sig or sell_sig:
-                    entry_p, entry_t = curr['close'], curr['time']
+                    if i + 1 >= len(df):
+                        continue
+                    next_c = df.loc[i + 1]
+                    entry_p = next_c['open']
+                    entry_t = next_c['time']
                     m = 1 if buy_sig else -1
                     act_ent = entry_p + (m * bot_state['spread_pips'] * bot_state['pip_value'])
                     
@@ -270,7 +274,7 @@ async def run_oanda_backtest(start_dt, mode='candle'):
                     be_activation_dist = 20 * bot_state['pip_value']
                     be_target = act_ent + (m * be_activation_dist)
                     
-                    for c in [v for v in val_candles if entry_t <= v['time'] <= exit_t]:
+                    for c in [v for v in val_candles if v['time'] >= entry_t]:
                         if buy_sig:
                             if bot_state['use_be'] and not be_activated and c['high'] >= be_target:
                                 sl_p = act_ent
