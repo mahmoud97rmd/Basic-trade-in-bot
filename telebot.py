@@ -231,8 +231,10 @@ async def run_advanced_backtest(days=7):
                     cc = df.loc[i-j]
                     if not (cc['ema50'] > cc['ema150']): b_ema = False
                     if not (cc['ema150'] > cc['ema50']): s_ema = False
-                trend_buy  = b_ema if bot_state['use_trend_filter'] else True
-                trend_sell = s_ema if bot_state['use_trend_filter'] else True
+                ma_parallel_buy  = curr['ema15'] > curr['ema50'] > curr['ema150']
+                ma_parallel_sell = curr['ema15'] < curr['ema50'] < curr['ema150']
+                trend_buy  = (b_ema and ma_parallel_buy)  if bot_state['use_trend_filter'] else True
+                trend_sell = (s_ema and ma_parallel_sell) if bot_state['use_trend_filter'] else True
 
                 buy_deep_stoch  = (prev['K'] <= 10) and (curr['K'] > 10)  and bot_state['use_stoch_deep']
                 buy_mid_stoch   = (10 < prev['K'] <= 15) and (curr['K'] > 15) and bot_state['use_stoch_mid']
@@ -496,8 +498,11 @@ async def run_oanda_backtest(start_dt, mode='candle'):
                     if not (c['ema50'] > c['ema150']): b_ema = False
                     if not (c['ema150'] > c['ema50']): s_ema = False
 
-                trend_buy = b_ema if bot_state['use_trend_filter'] else True
-                trend_sell = s_ema if bot_state['use_trend_filter'] else True
+                # فلتر التوازي الكامل للموفينجات
+                ma_parallel_buy  = curr['ema15'] > curr['ema50'] > curr['ema150']
+                ma_parallel_sell = curr['ema15'] < curr['ema50'] < curr['ema150']
+                trend_buy  = (b_ema and ma_parallel_buy)  if bot_state['use_trend_filter'] else True
+                trend_sell = (s_ema and ma_parallel_sell) if bot_state['use_trend_filter'] else True
                 
                 # --- Stochastic Triple-Net Logic ---
                 buy_deep_stoch = (prev['K'] <= 10) and (curr['K'] > 10) and bot_state['use_stoch_deep']
@@ -862,8 +867,10 @@ async def timeframe_scanner(tf):
                             if not (cc['ema50'] > cc['ema150']): b_ema = False
                             if not (cc['ema150'] > cc['ema50']): s_ema = False
 
-                        trend_buy = b_ema if bot_state['use_trend_filter'] else True
-                        trend_sell = s_ema if bot_state['use_trend_filter'] else True
+                        ma_parallel_buy  = curr['ema15'] > curr['ema50'] > curr['ema150']
+                        ma_parallel_sell = curr['ema15'] < curr['ema50'] < curr['ema150']
+                        trend_buy  = (b_ema and ma_parallel_buy)  if bot_state['use_trend_filter'] else True
+                        trend_sell = (s_ema and ma_parallel_sell) if bot_state['use_trend_filter'] else True
 
                         buy_deep_stoch = (prev['K'] <= 10) and (curr['K'] > 10) and bot_state['use_stoch_deep']
                         buy_mid_stoch  = (10 < prev['K'] <= 15) and (curr['K'] > 15) and bot_state['use_stoch_mid']
