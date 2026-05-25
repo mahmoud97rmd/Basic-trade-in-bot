@@ -30,11 +30,11 @@ def c_log(msg):
 bot_state = {
     'status': 'RUNNING',
     'strategy': 'NEW',
-    'filter_mode': 'FULL',
+    'filter_mode': 'NO_MA',
     'symbol': 'XAUUSD@',
     'live_connected': False,
     'timeframes': ['1m', '2m', '3m', '5m', '15m'],
-    'active_tfs': {'1m': False, '2m': False, '3m': False, '5m': True, '15m': False},
+    'active_tfs': {'1m': False, '2m': True, '3m': True, '5m': False, '15m': False},
     'lot_size': 0.05, 'pip_value': 0.1, 'spread_pips': 2.2,
     'chat_id': None, 'last_update_id': 0,
     'tp_pips': {'1m': 25, '2m': 30, '3m': 40, '5m': 70, '15m': 80},
@@ -43,10 +43,10 @@ bot_state = {
     'stoch_k': 5, 'stoch_d': 5, 'stoch_smooth': 5,  # قيم الستوكاستيك
     'use_stoch_deep': True,   # 10/90
     'use_stoch_mid':  True,   # 15/85
-    'use_stoch_shal': True,   # 20/80
+    'use_stoch_shal': False,   # 20/80
     # فلاتر الوقت
     'use_time_filter':   False,
-    'use_danger_filter': False,
+    'use_danger_filter': True,
     # إعدادات أخرى
     'use_f_cons': False, 'cons_count': 3,
     'use_be': False, 'use_atr': False, 'use_max_spread': True,
