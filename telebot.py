@@ -52,7 +52,8 @@ bot_state = {
     'comp_tolerance_fwd': 5,   
     'comp_use_deep': True,   
     'comp_use_mid':  True,   
-    'comp_use_shal': False,  
+    'comp_use_shal': False,
+    'comp_disable_window': False,  
     'setup_state': {
         tf: {
             'buy_active':    False,
@@ -243,7 +244,7 @@ def _run_composite_state(state: dict, curr: pd.Series, prev: pd.Series,
         state['buy_fire_idx'] = idx
     elif state['buy_active']:
         state['buy_wait'] += 1
-        if state['buy_wait'] > fwd:
+        if state['buy_wait'] > fwd and not bs.get('comp_disable_window'):
             state['buy_active'] = False
             state['buy_wait'] = 0
 
@@ -253,7 +254,7 @@ def _run_composite_state(state: dict, curr: pd.Series, prev: pd.Series,
         state['sell_fire_idx'] = idx
     elif state['sell_active']:
         state['sell_wait'] += 1
-        if state['sell_wait'] > fwd:
+        if state['sell_wait'] > fwd and not bs.get('comp_disable_window'):
             state['sell_active'] = False
             state['sell_wait'] = 0
 
@@ -439,12 +440,15 @@ def get_filters_keyboard():
             [{"text": f"DEEP  BUY avg≤10 / SELL avg≥90: {cd_i}", "callback_data": "toggle_comp_deep"}],
             [{"text": f"MID   BUY avg≤20 / SELL avg≥80: {cm_i}", "callback_data": "toggle_comp_mid"}],
             [{"text": f"SHAL  BUY avg≤30 / SELL avg≥70: {cs_i}", "callback_data": "toggle_comp_shal"}],
-            [{"text": "━━ نافذة البحث (Fire=10 ثابت) ━━", "callback_data": "noop"}],
-            [{"text": f"↩️ قبل العمود (Lookback) = {bs['comp_lookback']} شموع", "callback_data": "noop"}],
-            [{"text": "➖", "callback_data": "dec_lookback"}, {"text": f"{bs['comp_lookback']}", "callback_data": "noop"}, {"text": "➕", "callback_data": "inc_lookback"}],
-            [{"text": f"↪️ بعد العمود (Tolerance) = {bs['comp_tolerance_fwd']} شموع", "callback_data": "noop"}],
-            [{"text": "➖", "callback_data": "dec_fwd"}, {"text": f"{bs['comp_tolerance_fwd']}", "callback_data": "noop"}, {"text": "➕", "callback_data": "inc_fwd"}],
+            [{"text": f"━━ نافذة البحث: {'🔴 معطلة (مفتوحة دائماً)' if bs.get('comp_disable_window') else '🟢 مقيدة'} ━━", "callback_data": "toggle_comp_window"}],
         ]
+        if not bs.get('comp_disable_window'):
+            rows += [
+                [{"text": f"↩️ قبل العمود (Lookback) = {bs['comp_lookback']} شموع", "callback_data": "noop"}],
+                [{"text": "➖", "callback_data": "dec_lookback"}, {"text": f"{bs['comp_lookback']}", "callback_data": "noop"}, {"text": "➕", "callback_data": "inc_lookback"}],
+                [{"text": f"↪️ بعد العمود (Tolerance) = {bs['comp_tolerance_fwd']} شموع", "callback_data": "noop"}],
+                [{"text": "➖", "callback_data": "dec_fwd"}, {"text": f"{bs['comp_tolerance_fwd']}", "callback_data": "noop"}, {"text": "➕", "callback_data": "inc_fwd"}],
+            ]
     rows += [
         [{"text": "━━ فلاتر الوقت ━━", "callback_data": "noop"}],
         [{"text": f"Time Filter 08-17 UTC: {t_i}", "callback_data": "toggle_time"},
