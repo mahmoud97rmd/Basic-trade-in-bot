@@ -80,12 +80,10 @@ bot_state = {
     'comp_use_shal': False,  # BUY avg(K,D)<=30  / SELL avg(K,D)>=70
     'setup_state': {
         tf: {
-            'buy_active':    False,
-            'sell_active':   False,
-            'buy_fire_idx':  0,    # رقم شمعة ظهور عمود MACD>=10
-            'sell_fire_idx': 0,    # رقم شمعة ظهور عمود OsMA>=10
-            'buy_wait':      0,
-            'sell_wait':     0,
+            'buy_macd_wait': 999, 'sell_osma_wait': 999,
+            'buy_stoch_wait': 999, 'sell_stoch_wait': 999,
+            'buy_macd_val': 0.0,  'sell_osma_val': 0.0,
+            'buy_stoch_lbl': '',  'sell_stoch_lbl': ''
         }
         for tf in _TFS
     },
@@ -326,113 +324,72 @@ def _get_comp_zones(bs):
 
 def _run_composite_state(state: dict, curr: pd.Series, prev: pd.Series,
                           bs: dict, df: pd.DataFrame, idx: int) -> tuple:
-    """
-    COMPOSITE — المنطق المعكوس:
-
-    BUY:
-      1. Fire:   macd_rsi >= 10  → يُفعّل Setup ويحفظ fire_idx
-      2. Lookup: يبحث في نافذة [fire_idx-lookback .. fire_idx+fwd]
-                 عن تقاطع K صاعد فوق D داخل منطقة DEEP/MID/SHAL
-      → إطلاق BUY
-
-    SELL:
-      1. Fire:   osma_macd >= 10 → يُفعّل Setup
-      2. Lookup: تقاطع K هابط داخل منطقة 90/80/70 في النافذة
-      → إطلاق SELL
-
-    الإلغاء: بعد تجاوز fwd شموع بدون إيجاد تقاطع
-    """
-    macd_val = curr['macd_rsi']
-    osma_val = curr['osma_macd']
     lookback = bs.get('comp_lookback', 5)
     fwd      = bs.get('comp_tolerance_fwd', 5)
 
+    state['buy_macd_wait']  += 1
+    state['sell_osma_wait'] += 1
+    state['buy_stoch_wait'] += 1
+    state['sell_stoch_wait'] += 1
+
+    if curr['macd_rsi'] >= 10:
+        state['buy_macd_wait'] = 0
+        state['buy_macd_val']  = curr['macd_rsi']
+
+    if curr['osma_macd'] >= 10:
+        state['sell_osma_wait'] = 0
+        state['sell_osma_val']  = curr['osma_macd']
+
+    pk = prev['K_comp']; pd_ = prev['D_comp']
+    ck = curr['K_comp']; cd  = curr['D_comp']
+    avg = (ck + cd) / 2.0
     buy_zones, sell_zones = _get_comp_zones(bs)
-    buy_sig  = False
-    sell_sig = False
-    b_label  = ''
-    s_label  = ''
 
-    def _find_cross(fire_idx, direction):
-        """يبحث عن تقاطع K/D في نافذة [fire_idx-lookback .. fire_idx+fwd]."""
-        start_j = max(1, fire_idx - lookback)
-        end_j   = min(len(df) - 1, fire_idx + fwd)
-        for j in range(start_j, end_j + 1):
-            pk  = df.iloc[j-1]['K_comp']
-            pd_ = df.iloc[j-1]['D_comp']
-            ck  = df.iloc[j]['K_comp']
-            cd  = df.iloc[j]['D_comp']
-            avg = (ck + cd) / 2.0
-            if direction == 'up':
-                if (pk < pd_) and (ck >= cd):
-                    for lvl, nm in buy_zones:
-                        if avg <= lvl:
-                            return True, nm, lvl, ck, cd
-            else:
-                if (pk > pd_) and (ck <= cd):
-                    for lvl, nm in sell_zones:
-                        if avg >= lvl:
-                            return True, nm, lvl, ck, cd
-        return False, '', 0, 0.0, 0.0
+    if pk < pd_ and ck >= cd:
+        for lvl, nm in buy_zones:
+            if avg <= lvl:
+                state['buy_stoch_wait'] = 0
+                state['buy_stoch_lbl']  = f"STOCH {nm}(<={lvl}) K={ck:.1f}"
+                break
 
-    # ── BUY ──────────────────────────────────────────────────
-    if not state['buy_active']:
-        if macd_val >= 10:
-            state['buy_active']   = True
-            state['buy_fire_idx'] = idx
-            state['buy_wait']     = 0
-    
-    if state['buy_active']:
-        fire_idx = state['buy_fire_idx']
-        waited   = idx - fire_idx
-        found, znm, zlvl, ck, cd = _find_cross(fire_idx, 'up')
-        if found:
-            buy_sig             = True
-            b_label             = (f"MACD={df.iloc[fire_idx]['macd_rsi']:.2f}[≥10] "
-                                   f"STOCH {znm}(≤{zlvl}) "
-                                   f"K={ck:.1f} D={cd:.1f} "
-                                   f"[LB={lookback} FWD={fwd}]")
-            state['buy_active']   = False
-            state['buy_fire_idx'] = 0
-            state['buy_wait']     = 0
-        elif waited > fwd:
-            state['buy_active']   = False
-            state['buy_fire_idx'] = 0
-            state['buy_wait']     = 0
+    if pk > pd_ and ck <= cd:
+        for lvl, nm in sell_zones:
+            if avg >= lvl:
+                state['sell_stoch_wait'] = 0
+                state['sell_stoch_lbl']  = f"STOCH {nm}(>={lvl}) K={ck:.1f}"
+                break
 
-    # ── SELL ─────────────────────────────────────────────────
-    if not state['sell_active']:
-        if osma_val >= 10:
-            state['sell_active']   = True
-            state['sell_fire_idx'] = idx
-            state['sell_wait']     = 0
+    buy_sig, sell_sig = False, False
+    b_label, s_label  = '', ''
 
-    if state['sell_active']:
-        fire_idx = state['sell_fire_idx']
-        waited   = idx - fire_idx
-        found, znm, zlvl, ck, cd = _find_cross(fire_idx, 'down')
-        if found:
-            sell_sig              = True
-            s_label               = (f"OsMA={df.iloc[fire_idx]['osma_macd']:.2f}[≥10] "
-                                     f"STOCH {znm}(≥{zlvl}) "
-                                     f"K={ck:.1f} D={cd:.1f} "
-                                     f"[LB={lookback} FWD={fwd}]")
-            state['sell_active']   = False
-            state['sell_fire_idx'] = 0
-            state['sell_wait']     = 0
-        elif waited > fwd:
-            state['sell_active']   = False
-            state['sell_fire_idx'] = 0
-            state['sell_wait']     = 0
+    if state['buy_macd_wait'] == 0 and state['buy_stoch_wait'] <= lookback:
+        buy_sig = True
+        b_label = f"MACD={state['buy_macd_val']:.1f} + {state['buy_stoch_lbl']} [STOCH First]"
+    elif state['buy_stoch_wait'] == 0 and state['buy_macd_wait'] <= fwd:
+        buy_sig = True
+        b_label = f"MACD={state['buy_macd_val']:.1f} + {state['buy_stoch_lbl']} [MACD First]"
+
+    if state['sell_osma_wait'] == 0 and state['sell_stoch_wait'] <= lookback:
+        sell_sig = True
+        s_label = f"OsMA={state['sell_osma_val']:.1f} + {state['sell_stoch_lbl']} [STOCH First]"
+    elif state['sell_stoch_wait'] == 0 and state['sell_osma_wait'] <= fwd:
+        sell_sig = True
+        s_label = f"OsMA={state['sell_osma_val']:.1f} + {state['sell_stoch_lbl']} [OsMA First]"
 
     if buy_sig and sell_sig:
-        if macd_val >= osma_val:
+        if curr['macd_rsi'] >= curr['osma_macd']:
             sell_sig = False; s_label = ''
         else:
             buy_sig = False; b_label = ''
 
+    if buy_sig:
+        state['buy_macd_wait'] = 999
+        state['buy_stoch_wait'] = 999
+    if sell_sig:
+        state['sell_osma_wait'] = 999
+        state['sell_stoch_wait'] = 999
+
     label = b_label if buy_sig else s_label
-    return buy_sig, sell_sig, label
 
 
 def evaluate_composite_live(tf: str, curr: pd.Series, prev: pd.Series,
@@ -772,7 +729,7 @@ async def run_oanda_backtest(start_dt):
                 continue
 
             safe_start = max(10, bot_state['cons_count'])
-            bt_cs = {'buy_active': False, 'sell_active': False, 'buy_fire_idx': 0, 'sell_fire_idx': 0, 'buy_wait': 0, 'sell_wait': 0}
+            bt_cs = {'buy_macd_wait': 999, 'sell_osma_wait': 999, 'buy_stoch_wait': 999, 'sell_stoch_wait': 999, 'buy_macd_val': 0.0, 'sell_osma_val': 0.0, 'buy_stoch_lbl': '', 'sell_stoch_lbl': ''}
             signals_found = 0
 
             for i in df[df['time'] >= start_dt].index:
@@ -1020,9 +977,7 @@ async def run_diagnostic():
             )
 
         # 5. محاكاة الإشارات على آخر 200 شمعة مع تفصيل
-        bt_state = {'buy_active':False,'sell_active':False,
-                    'buy_zone':'','sell_zone':'','buy_zone_lvl':0,'sell_zone_lvl':0,
-                    'buy_wait':0,'sell_wait':0,'buy_fire_idx':0,'sell_fire_idx':0}
+        bt_state = {'buy_macd_wait': 999, 'sell_osma_wait': 999, 'buy_stoch_wait': 999, 'sell_stoch_wait': 999, 'buy_macd_val': 0.0, 'sell_osma_val': 0.0, 'buy_stoch_lbl': '', 'sell_stoch_lbl': ''}
         sigs = 0; buy_sigs = 0; sell_sigs = 0
         setups_opened = 0; setups_fired = 0; setups_cancelled = 0
         sub = df.tail(200).reset_index(drop=True).reset_index(drop=True)
@@ -1092,7 +1047,7 @@ async def run_advanced_backtest(days=7):
             df = calculate_indicators(
                 pd.DataFrame(c_data).sort_values('time').reset_index(drop=True))
             safe_start = max(10, bot_state['cons_count'])
-            bt_cs = {'buy_active': False, 'sell_active': False, 'buy_fire_idx': 0, 'sell_fire_idx': 0, 'buy_wait': 0, 'sell_wait': 0}
+            bt_cs = {'buy_macd_wait': 999, 'sell_osma_wait': 999, 'buy_stoch_wait': 999, 'sell_stoch_wait': 999, 'buy_macd_val': 0.0, 'sell_osma_val': 0.0, 'buy_stoch_lbl': '', 'sell_stoch_lbl': ''}
 
             for i in df[df['time'] >= start_dt].index:
                 if i < safe_start: continue
@@ -1511,9 +1466,10 @@ async def process_tg_update(update):
         def _reset_composite_states():
             for tf in _TFS:
                 bot_state['setup_state'][tf] = {
-                    'buy_active': False, 'sell_active': False,
-                    'buy_fire_idx': 0, 'sell_fire_idx': 0,
-                    'buy_wait': 0, 'sell_wait': 0}
+                    'buy_macd_wait': 999, 'sell_osma_wait': 999,
+                    'buy_stoch_wait': 999, 'sell_stoch_wait': 999,
+                    'buy_macd_val': 0.0,  'sell_osma_val': 0.0,
+                    'buy_stoch_lbl': '',  'sell_stoch_lbl': ''}
 
         # ── Navigation ──
         if d == "menu_main":
@@ -1635,7 +1591,7 @@ async def process_tg_update(update):
         elif d.startswith("toggle_tf_"):
             tf = d.split("_")[2]
             bot_state['active_tfs'][tf] = not bot_state['active_tfs'][tf]
-            bot_state['setup_state'][tf] = {'buy_active': False, 'sell_active': False, 'buy_fire_idx': 0, 'sell_fire_idx': 0, 'buy_wait': 0, 'sell_wait': 0}
+            bot_state['setup_state'][tf] = {'buy_macd_wait': 999, 'sell_osma_wait': 999, 'buy_stoch_wait': 999, 'sell_stoch_wait': 999, 'buy_macd_val': 0.0, 'sell_osma_val': 0.0, 'buy_stoch_lbl': '', 'sell_stoch_lbl': ''}
             await edit_tg_msg(chat_id, msg_id, "⏱ إدارة الفريمات:", get_tf_keyboard())
 
         # ── Settings ──
