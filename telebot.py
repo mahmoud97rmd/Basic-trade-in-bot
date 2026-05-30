@@ -71,31 +71,21 @@ bot_state = {
     'cons_count':     3,
 
     # ── إعدادات COMPOSITE ──
-    'tolerance_mode':        'LEVEL',  # 'LEVEL' | 'TIME'
-    'max_tolerance_candles': 3,
-    # مستويات trigger للـ COMPOSITE (متوافقة مع deep/mid/shal)
-    # BUY  trigger: K_comp <= المستوى   |  SELL trigger: K_comp >= (100-المستوى)
-    'comp_use_deep': True,   # BUY K<=10  / SELL K>=90
-    'comp_use_mid':  True,   # BUY K<=20  / SELL K>=80
-    'comp_use_shal': False,  # BUY K<=30  / SELL K>=70
-    # مستويات fire للإشارة (MACD% للشراء / OsMA% للبيع)
-    # BUY  fire: macd_norm <= المستوى   |  SELL fire: osma_norm >= (100-المستوى)
-    'comp_rsi_level_10': True,   # BUY rsi2<=10 / SELL rsi2>=90
-    'comp_rsi_level_20': False,  # BUY rsi2<=20 / SELL rsi2>=80
-    'comp_check_dominant_bar': True,  # فحص نوع العمود السائد
+    # نافذة البحث عن تقاطع K/D حول شمعة العمود
+    'comp_lookback':      5,   # شموع للخلف قبل ظهور العمود  (1-10)
+    'comp_tolerance_fwd': 5,   # شموع للأمام بعد ظهور العمود (1-10)
+    # مناطق Stochastic للتقاطع
+    'comp_use_deep': True,   # BUY avg(K,D)<=10  / SELL avg(K,D)>=90
+    'comp_use_mid':  True,   # BUY avg(K,D)<=20  / SELL avg(K,D)>=80
+    'comp_use_shal': False,  # BUY avg(K,D)<=30  / SELL avg(K,D)>=70
     'setup_state': {
         tf: {
             'buy_active':    False,
             'sell_active':   False,
-            'buy_zone':      '',    # اسم المنطقة التي فعّلت الـ Setup
-            'sell_zone':     '',
+            'buy_fire_idx':  0,    # رقم شمعة ظهور عمود MACD>=10
+            'sell_fire_idx': 0,    # رقم شمعة ظهور عمود OsMA>=10
             'buy_wait':      0,
             'sell_wait':     0,
-            # شرط اللمس: يجب أن يلمس MACD% مستوى الـ fire قبل الإطلاق
-            # BUY:  macd_norm يجب أن يصل إلى ≤ fire_level أولاً (لمس من الأعلى)
-            # SELL: osma_norm يجب أن يصل إلى ≥ fire_level أولاً (لمس من الأسفل)
-            'macd_touched':  False, # هل لمس macd_norm مستوى الـ fire؟
-            'osma_touched':  False, # هل لمس osma_norm مستوى الـ fire؟
         }
         for tf in _TFS
     },
@@ -335,142 +325,105 @@ def _get_comp_zones(bs):
 
 
 def _run_composite_state(state: dict, curr: pd.Series, prev: pd.Series,
-                          mode: str, max_cnt: int,
-                          bs: dict) -> tuple:
+                          bs: dict, df: pd.DataFrame, idx: int) -> tuple:
     """
-    آلة الحالة للـ COMPOSITE — المنطق الصحيح:
+    COMPOSITE — المنطق المعكوس:
 
     BUY:
-      1. Stochastic Trigger: K/D تقاطع صاعد داخل منطقة التشبع البيعي
-         (DEEP: avg(K,D)<=10  |  MID: avg(K,D)<=20  |  SHAL: avg(K,D)<=30)
-      2. Fire: عمود MACD الأخضر (macd_rsi) يلمس أو يتجاوز مستوى 10
-         → إطلاق إشارة الشراء فوراً
+      1. Fire:   macd_rsi >= 10  → يُفعّل Setup ويحفظ fire_idx
+      2. Lookup: يبحث في نافذة [fire_idx-lookback .. fire_idx+fwd]
+                 عن تقاطع K صاعد فوق D داخل منطقة DEEP/MID/SHAL
+      → إطلاق BUY
 
     SELL:
-      1. Stochastic Trigger: K/D تقاطع هابط داخل منطقة التشبع الشرائي
-         (DEEP: avg(K,D)>=90  |  MID: avg(K,D)>=80  |  SHAL: avg(K,D)>=70)
-      2. Fire: عمود OsMA الأحمر (osma_macd) يلمس أو يتجاوز مستوى 10
-         → إطلاق إشارة البيع فوراً
+      1. Fire:   osma_macd >= 10 → يُفعّل Setup
+      2. Lookup: تقاطع K هابط داخل منطقة 90/80/70 في النافذة
+      → إطلاق SELL
 
-    السماحية:
-      LEVEL: Setup يبقى حتى يخرج K من المنطقة
-      TIME:  Setup يُلغى بعد N شموع
+    الإلغاء: بعد تجاوز fwd شموع بدون إيجاد تقاطع
     """
-    k         = curr['K_comp']
-    d         = curr['D_comp']
-    macd_val  = curr['macd_rsi']    # عمود MACD الأخضر على لوحة RSI
-    osma_val  = curr['osma_macd']   # عمود OsMA الأحمر على MACD
+    macd_val = curr['macd_rsi']
+    osma_val = curr['osma_macd']
+    lookback = bs.get('comp_lookback', 5)
+    fwd      = bs.get('comp_tolerance_fwd', 5)
 
-    prev_k    = prev['K_comp']
-    prev_d    = prev['D_comp']
-
-    k_cross_up   = (prev_k < prev_d) and (k >= d)
-    k_cross_down = (prev_k > prev_d) and (k <= d)
-
+    buy_zones, sell_zones = _get_comp_zones(bs)
     buy_sig  = False
     sell_sig = False
     b_label  = ''
     s_label  = ''
 
-    buy_zones, sell_zones = _get_comp_zones(bs)
+    def _find_cross(fire_idx, direction):
+        """يبحث عن تقاطع K/D في نافذة [fire_idx-lookback .. fire_idx+fwd]."""
+        start_j = max(1, fire_idx - lookback)
+        end_j   = min(len(df) - 1, fire_idx + fwd)
+        for j in range(start_j, end_j + 1):
+            pk  = df.iloc[j-1]['K_comp']
+            pd_ = df.iloc[j-1]['D_comp']
+            ck  = df.iloc[j]['K_comp']
+            cd  = df.iloc[j]['D_comp']
+            avg = (ck + cd) / 2.0
+            if direction == 'up':
+                if (pk < pd_) and (ck >= cd):
+                    for lvl, nm in buy_zones:
+                        if avg <= lvl:
+                            return True, nm, lvl, ck, cd
+            else:
+                if (pk > pd_) and (ck <= cd):
+                    for lvl, nm in sell_zones:
+                        if avg >= lvl:
+                            return True, nm, lvl, ck, cd
+        return False, '', 0, 0.0, 0.0
 
     # ── BUY ──────────────────────────────────────────────────
     if not state['buy_active']:
-        if k_cross_up:
-            avg_kd = (k + d) / 2.0
-            for zone_level, zone_name in buy_zones:
-                if avg_kd <= zone_level:
-                    state['buy_active']   = True
-                    state['buy_zone']     = zone_name
-                    state['buy_zone_lvl'] = zone_level
-                    state['buy_wait']     = 0
-                    state['macd_touched'] = False
-                    break
-    else:
-        zone_lvl = state.get('buy_zone_lvl', 20)
-        zone_nm  = state.get('buy_zone', 'MID')
-        fired    = False
-
         if macd_val >= 10:
-            state['macd_touched'] = True
-
-        if state['macd_touched']:
-            buy_sig               = True
-            b_label               = (f"STOCH {zone_nm}(≤{zone_lvl}) "
-                                     f"MACD={macd_val:.2f}[≥10] "
-                                     f"K={k:.1f} D={d:.1f}")
-            state['buy_active']   = False
-            state['buy_zone']     = ''
-            state['buy_zone_lvl'] = 0
+            state['buy_active']   = True
+            state['buy_fire_idx'] = idx
             state['buy_wait']     = 0
-            state['macd_touched'] = False
-            fired = True
-
-        if not fired:
-            if mode == 'LEVEL':
-                if k > zone_lvl:
-                    state['buy_active']   = False
-                    state['buy_zone']     = ''
-                    state['buy_zone_lvl'] = 0
-                    state['buy_wait']     = 0
-                    state['macd_touched'] = False
-            else:
-                state['buy_wait'] += 1
-                if state['buy_wait'] >= max_cnt:
-                    state['buy_active']   = False
-                    state['buy_zone']     = ''
-                    state['buy_zone_lvl'] = 0
-                    state['buy_wait']     = 0
-                    state['macd_touched'] = False
+    
+    if state['buy_active']:
+        fire_idx = state['buy_fire_idx']
+        waited   = idx - fire_idx
+        found, znm, zlvl, ck, cd = _find_cross(fire_idx, 'up')
+        if found:
+            buy_sig             = True
+            b_label             = (f"MACD={df.iloc[fire_idx]['macd_rsi']:.2f}[≥10] "
+                                   f"STOCH {znm}(≤{zlvl}) "
+                                   f"K={ck:.1f} D={cd:.1f} "
+                                   f"[LB={lookback} FWD={fwd}]")
+            state['buy_active']   = False
+            state['buy_fire_idx'] = 0
+            state['buy_wait']     = 0
+        elif waited > fwd:
+            state['buy_active']   = False
+            state['buy_fire_idx'] = 0
+            state['buy_wait']     = 0
 
     # ── SELL ─────────────────────────────────────────────────
     if not state['sell_active']:
-        if k_cross_down:
-            avg_kd = (k + d) / 2.0
-            for zone_level, zone_name in sell_zones:
-                if avg_kd >= zone_level:
-                    state['sell_active']   = True
-                    state['sell_zone']     = zone_name
-                    state['sell_zone_lvl'] = zone_level
-                    state['sell_wait']     = 0
-                    state['osma_touched']  = False
-                    break
-    else:
-        zone_lvl = state.get('sell_zone_lvl', 80)
-        zone_nm  = state.get('sell_zone', 'MID')
-        fired    = False
-
         if osma_val >= 10:
-            state['osma_touched'] = True
-
-        if state['osma_touched']:
-            sell_sig              = True
-            s_label               = (f"STOCH {zone_nm}(≥{zone_lvl}) "
-                                     f"OsMA={osma_val:.2f}[≥10] "
-                                     f"K={k:.1f} D={d:.1f}")
-            state['sell_active']   = False
-            state['sell_zone']     = ''
-            state['sell_zone_lvl'] = 0
+            state['sell_active']   = True
+            state['sell_fire_idx'] = idx
             state['sell_wait']     = 0
-            state['osma_touched']  = False
-            fired = True
 
-        if not fired:
-            if mode == 'LEVEL':
-                if k < zone_lvl:
-                    state['sell_active']   = False
-                    state['sell_zone']     = ''
-                    state['sell_zone_lvl'] = 0
-                    state['sell_wait']     = 0
-                    state['osma_touched']  = False
-            else:
-                state['sell_wait'] += 1
-                if state['sell_wait'] >= max_cnt:
-                    state['sell_active']   = False
-                    state['sell_zone']     = ''
-                    state['sell_zone_lvl'] = 0
-                    state['sell_wait']     = 0
-                    state['osma_touched']  = False
+    if state['sell_active']:
+        fire_idx = state['sell_fire_idx']
+        waited   = idx - fire_idx
+        found, znm, zlvl, ck, cd = _find_cross(fire_idx, 'down')
+        if found:
+            sell_sig              = True
+            s_label               = (f"OsMA={df.iloc[fire_idx]['osma_macd']:.2f}[≥10] "
+                                     f"STOCH {znm}(≥{zlvl}) "
+                                     f"K={ck:.1f} D={cd:.1f} "
+                                     f"[LB={lookback} FWD={fwd}]")
+            state['sell_active']   = False
+            state['sell_fire_idx'] = 0
+            state['sell_wait']     = 0
+        elif waited > fwd:
+            state['sell_active']   = False
+            state['sell_fire_idx'] = 0
+            state['sell_wait']     = 0
 
     if buy_sig and sell_sig:
         if macd_val >= osma_val:
@@ -482,24 +435,20 @@ def _run_composite_state(state: dict, curr: pd.Series, prev: pd.Series,
     return buy_sig, sell_sig, label
 
 
-def evaluate_composite_live(tf: str, curr: pd.Series, prev: pd.Series) -> tuple:
+def evaluate_composite_live(tf: str, curr: pd.Series, prev: pd.Series,
+                             df: pd.DataFrame, idx: int) -> tuple:
     """Live: يُعدّل bot_state مباشرةً. يُعيد (buy, sell, label)."""
     state = bot_state['setup_state'][tf]
-    b, s, lbl = _run_composite_state(
-        state, curr, prev,
-        bot_state['tolerance_mode'],
-        bot_state['max_tolerance_candles'],
-        bot_state
-    )
+    b, s, lbl = _run_composite_state(state, curr, prev, bot_state, df, idx)
     if b: c_log(f"[{tf}] 🟢 COMPOSITE BUY  [{lbl}]")
     if s: c_log(f"[{tf}] 🔴 COMPOSITE SELL [{lbl}]")
     return b, s, lbl
 
 
 def evaluate_composite_backtest(state: dict, curr: pd.Series, prev: pd.Series,
-                                 mode: str, max_cnt: int, bs: dict) -> tuple:
+                                 bs: dict, df: pd.DataFrame, idx: int) -> tuple:
     """Backtest: dict معزول لكل TF."""
-    return _run_composite_state(state, curr, prev, mode, max_cnt, bs)
+    return _run_composite_state(state, curr, prev, bs, df, idx)
 
 
 def is_danger_time(dt_utc: datetime) -> bool:
@@ -651,35 +600,24 @@ def get_filters_keyboard():
               "callback_data": "toggle_f_cons"}],
         ]
     else:  # COMPOSITE
-        tl_i = "✅" if bot_state['tolerance_mode'] == 'LEVEL' else "⬜"
-        tt_i = "✅" if bot_state['tolerance_mode'] == 'TIME'  else "⬜"
-        cnt  = bot_state['max_tolerance_candles']
-        # trigger zones
+        bs   = bot_state
         cd_i = "🟢" if bot_state['comp_use_deep']  else "🔴"
         cm_i = "🟢" if bot_state['comp_use_mid']   else "🔴"
         cs_i = "🟢" if bot_state['comp_use_shal']  else "🔴"
-        # fire levels
-        cf_t = "🟢" if bot_state['comp_rsi_level_10']       else "🔴"
-        cf_n = "🟢" if bot_state['comp_rsi_level_20']       else "🔴"
-        cf_l = "🟢" if bot_state['comp_check_dominant_bar'] else "🔴"
         rows += [
-            [{"text": "━━ منطقة Trigger (دخول الـ Setup) ━━", "callback_data": "noop"}],
-            [{"text": f"DEEP  BUY K≤10 / SELL K≥90: {cd_i}",  "callback_data": "toggle_comp_deep"}],
-            [{"text": f"MID   BUY K≤20 / SELL K≥80: {cm_i}",  "callback_data": "toggle_comp_mid"}],
-            [{"text": f"SHAL  BUY K≤30 / SELL K≥70: {cs_i}",  "callback_data": "toggle_comp_shal"}],
-            [{"text": "━━ مستوى Fire (إطلاق الإشارة) ━━", "callback_data": "noop"}],
-            [{"text": f"BUY rsi2≤10 / SELL rsi2≥90: {cf_t}", "callback_data": "toggle_comp_rsi10"}],
-            [{"text": f"BUY rsi2≤20 / SELL rsi2≥80: {cf_n}", "callback_data": "toggle_comp_rsi20"}],
-            [{"text": f"فحص نوع العمود (MACD/OsMA): {cf_l}",  "callback_data": "toggle_comp_dominant"}],
-            [{"text": "━━ نافذة السماحية (اختر واحدة) ━━", "callback_data": "noop"}],
-            [{"text": f"{tl_i} LEVEL: إلغاء عند خروج K من المنطقة",
-              "callback_data": "set_tol_level"}],
-            [{"text": f"{tt_i} TIME:  إلغاء بعد {cnt} شمعة",
-              "callback_data": "set_tol_time"}],
-            [{"text": "━━ عدد شموع السماحية (TIME فقط) ━━", "callback_data": "noop"}],
-            [{"text": "➖", "callback_data": "dec_tol_cnt"},
-             {"text": f"السماحية = {cnt} شموع", "callback_data": "noop"},
-             {"text": "➕", "callback_data": "inc_tol_cnt"}],
+            [{"text": "━━ منطقة Stochastic للتقاطع ━━", "callback_data": "noop"}],
+            [{"text": f"DEEP  BUY avg≤10 / SELL avg≥90: {cd_i}", "callback_data": "toggle_comp_deep"}],
+            [{"text": f"MID   BUY avg≤20 / SELL avg≥80: {cm_i}", "callback_data": "toggle_comp_mid"}],
+            [{"text": f"SHAL  BUY avg≤30 / SELL avg≥70: {cs_i}", "callback_data": "toggle_comp_shal"}],
+            [{"text": "━━ نافذة البحث (Fire=10 ثابت) ━━", "callback_data": "noop"}],
+            [{"text": f"↩️ قبل العمود (Lookback) = {bs['comp_lookback']} شموع", "callback_data": "noop"}],
+            [{"text": "➖", "callback_data": "dec_lookback"},
+             {"text": f"{bs['comp_lookback']}", "callback_data": "noop"},
+             {"text": "➕", "callback_data": "inc_lookback"}],
+            [{"text": f"↪️ بعد العمود (Tolerance) = {bs['comp_tolerance_fwd']} شموع", "callback_data": "noop"}],
+            [{"text": "➖", "callback_data": "dec_fwd"},
+             {"text": f"{bs['comp_tolerance_fwd']}", "callback_data": "noop"},
+             {"text": "➕", "callback_data": "inc_fwd"}],
         ]
 
     rows += [
@@ -763,9 +701,7 @@ def _get_signal_for_bar(df, i, curr, prev, tf, bt_composite_state=None):
     else:  # COMPOSITE
         buy_sig, sell_sig, label = evaluate_composite_backtest(
             bt_composite_state, curr, prev,
-            bot_state['tolerance_mode'],
-            bot_state['max_tolerance_candles'],
-            bot_state)
+            bot_state, df, i)
         # أضف K_comp للـ label إذا كان فارغاً (حالة عدم إطلاق إشارة)
         if not label:
             label = f"K={curr['K_comp']:.0f}"
@@ -783,8 +719,8 @@ async def run_oanda_backtest(start_dt):
     c_log("بدء الباك تيست...")
 
     sm = bot_state['strategy_mode']
-    tol_desc = (f"COMPOSITE/{bot_state['tolerance_mode']}"
-                f"({bot_state['max_tolerance_candles']})" if sm == 'COMPOSITE'
+    tol_desc = (f"COMPOSITE/LB{bot_state['comp_lookback']}_FWD{bot_state['comp_tolerance_fwd']}"
+                if sm == 'COMPOSITE'
                 else f"{sm}/{bot_state['filter_mode']}")
 
     await send_tg_msg(
@@ -822,7 +758,7 @@ async def run_oanda_backtest(start_dt):
                 continue
 
             safe_start = max(10, bot_state['cons_count'])
-            bt_cs = {'buy_active': False, 'sell_active': False, 'buy_zone': '', 'sell_zone': '', 'buy_zone_lvl': 0, 'sell_zone_lvl': 0, 'buy_wait': 0, 'sell_wait': 0, 'macd_touched': False, 'osma_touched': False}
+            bt_cs = {'buy_active': False, 'sell_active': False, 'buy_fire_idx': 0, 'sell_fire_idx': 0, 'buy_wait': 0, 'sell_wait': 0}
             signals_found = 0
 
             for i in df[df['time'] >= start_dt].index:
@@ -1072,37 +1008,41 @@ async def run_diagnostic():
                 f"   مناطق SELL: {sell_zones}"
             )
 
-        # 5. محاكاة الإشارات على آخر 100 شمعة
+        # 5. محاكاة الإشارات على آخر 200 شمعة مع تفصيل
         bt_state = {'buy_active':False,'sell_active':False,
                     'buy_zone':'','sell_zone':'','buy_zone_lvl':0,'sell_zone_lvl':0,
-                    'buy_wait':0,'sell_wait':0,'macd_touched':False,'osma_touched':False}
-        sigs = 0
-        sub = df.tail(100).reset_index(drop=True)
+                    'buy_wait':0,'sell_wait':0,'buy_fire_idx':0,'sell_fire_idx':0}
+        sigs = 0; buy_sigs = 0; sell_sigs = 0
+        setups_opened = 0; setups_fired = 0; setups_cancelled = 0
+        sub = df.tail(200).reset_index(drop=True).reset_index(drop=True)
+        prev_buy_active = False; prev_sell_active = False
         for i in range(1, len(sub)):
             c = sub.iloc[i]; p = sub.iloc[i-1]
+            was_buy = bt_state['buy_active']
+            was_sell = bt_state['sell_active']
             b, s, lbl = evaluate_composite_backtest(
                 bt_state, c, p,
-                bot_state['tolerance_mode'],
-                bot_state['max_tolerance_candles'],
-                bot_state)
-            if b or s: sigs += 1
+                bot_state, sub, i)
+            if bt_state['buy_active'] and not was_buy:   setups_opened += 1
+            if bt_state['sell_active'] and not was_sell: setups_opened += 1
+            if b: buy_sigs  += 1; sigs += 1; setups_fired += 1
+            if s: sell_sigs += 1; sigs += 1; setups_fired += 1
+            if was_buy  and not bt_state['buy_active']  and not b: setups_cancelled += 1
+            if was_sell and not bt_state['sell_active'] and not s: setups_cancelled += 1
 
-        lines.append(f"🎯 إشارات في آخر 100 شمعة: {sigs}")
-        if sigs == 0:
+        lines.append(
+            f"🎯 إشارات في آخر 200 شمعة: {sigs} "
+            f"(BUY:{buy_sigs} SELL:{sell_sigs})\n"
+            f"   Setups مفتوحة: {setups_opened} | "
+            f"أُطلقت: {setups_fired} | ألغيت: {setups_cancelled}"
+        )
+        if sigs == 0 and setups_opened == 0:
+            lines.append("❌ لا setups تفتح أصلاً — K/D لا يتقاطعان داخل المنطقة")
+        elif sigs == 0 and setups_opened > 0:
             lines.append(
-                "❌ لا إشارات — السبب المحتمل:\n"
-                "  1. macd_rsi لا يصل لـ 10 (القيم صغيرة جداً)\n"
-                "  2. لا تقاطع K/D داخل المناطق المفعّلة\n"
-                "  3. كلا الشرطين لا يتحققان في نفس الـ Setup"
-            )
-
-        # 6. اقتراح حل
-        if macd_max < 10:
-            pct = (df['macd_rsi'] >= macd_max * 0.5).sum()
-            lines.append(
-                f"💡 اقتراح: أقصى macd_rsi = {macd_max:.3f}\n"
-                f"   يبدو أن مستوى الـ fire يجب أن يكون أقل بكثير من 10\n"
-                f"   جرب: مستوى {macd_max*0.7:.2f} (70% من الأقصى)"
+                f"⚠️ {setups_opened} setup تفتح لكن لا إشارات\n"
+                f"   macd_rsi >= 10 لا يحدث بعد التقاطع\n"
+                f"   أو يحدث قبله فقط"
             )
 
     await send_tg_msg("\n".join(lines))
@@ -1114,8 +1054,8 @@ async def run_advanced_backtest(days=7):
     bot_state['is_backtesting'] = True
     start_dt = datetime.now(timezone.utc) - timedelta(days=days)
     sm = bot_state['strategy_mode']
-    tol_desc = (f"COMPOSITE/{bot_state['tolerance_mode']}"
-                f"({bot_state['max_tolerance_candles']})" if sm == 'COMPOSITE'
+    tol_desc = (f"COMPOSITE/LB{bot_state['comp_lookback']}_FWD{bot_state['comp_tolerance_fwd']}"
+                if sm == 'COMPOSITE'
                 else f"{sm}/{bot_state['filter_mode']}")
 
     await send_tg_msg(
@@ -1141,7 +1081,7 @@ async def run_advanced_backtest(days=7):
             df = calculate_indicators(
                 pd.DataFrame(c_data).sort_values('time').reset_index(drop=True))
             safe_start = max(10, bot_state['cons_count'])
-            bt_cs = {'buy_active': False, 'sell_active': False, 'buy_zone': '', 'sell_zone': '', 'buy_zone_lvl': 0, 'sell_zone_lvl': 0, 'buy_wait': 0, 'sell_wait': 0, 'macd_touched': False, 'osma_touched': False}
+            bt_cs = {'buy_active': False, 'sell_active': False, 'buy_fire_idx': 0, 'sell_fire_idx': 0, 'buy_wait': 0, 'sell_wait': 0}
 
             for i in df[df['time'] >= start_dt].index:
                 if i < safe_start: continue
@@ -1445,7 +1385,7 @@ async def timeframe_scanner(tf):
                         if raw_sell and not sell_sig:
                             c_log(f"🛑 [{tf}] SELL {s_lbl} مرفوض (فلتر: {bot_state['filter_mode']})")
                     else:
-                        buy_sig, sell_sig, label = evaluate_composite_live(tf, curr, prev)
+                        buy_sig, sell_sig, label = evaluate_composite_live(tf, curr, prev, df, len(df)-2)
 
                     # فلتر السبريد
                     skip = False
@@ -1532,7 +1472,7 @@ async def process_tg_update(update):
                         f"MACD_rsi:{curr['macd_rsi']:.3f} (GREEN>=10=BUY)\n"
                         f"OsMA_norm:{curr['osma_norm']:.1f} (RED)\n"
                         f"BUY active:{st['buy_active']} | SELL active:{st['sell_active']}\n"
-                        f"buy_wait:{st['buy_wait']} | sell_wait:{st['sell_wait']} | Tolerance:{bot_state['tolerance_mode']}")
+                        f"B_fire:{st.get('buy_fire_idx',0)} | S_fire:{st.get('sell_fire_idx',0)}")
             except Exception as e:
                 await send_tg_msg(f"❌ خطأ: {e}")
 
@@ -1564,6 +1504,7 @@ async def process_tg_update(update):
             for tf in _TFS:
                 bot_state['setup_state'][tf] = {
                     'buy_active': False, 'sell_active': False,
+                    'buy_fire_idx': 0, 'sell_fire_idx': 0,
                     'buy_wait': 0, 'sell_wait': 0}
 
         # ── Navigation ──
@@ -1650,19 +1591,19 @@ async def process_tg_update(update):
         elif d == "toggle_comp_dominant":
             bot_state['comp_check_dominant_bar'] = not bot_state['comp_check_dominant_bar']
             await edit_tg_msg(chat_id, msg_id, "🎛 <b>فلاتر COMPOSITE:</b>", get_filters_keyboard())
-        # السماحية
-        elif d == "set_tol_level":
-            bot_state['tolerance_mode'] = 'LEVEL'; _reset_composite_states()
-            await edit_tg_msg(chat_id, msg_id, "✅ LEVEL مُفعّل", get_filters_keyboard())
-        elif d == "set_tol_time":
-            bot_state['tolerance_mode'] = 'TIME'; _reset_composite_states()
-            await edit_tg_msg(chat_id, msg_id, "✅ TIME مُفعّل", get_filters_keyboard())
-        elif d == "inc_tol_cnt":
-            bot_state['max_tolerance_candles'] = min(bot_state['max_tolerance_candles']+1, 20)
-            await edit_tg_msg(chat_id, msg_id, "🎛 <b>فلاتر:</b>", get_filters_keyboard())
-        elif d == "dec_tol_cnt":
-            bot_state['max_tolerance_candles'] = max(bot_state['max_tolerance_candles']-1, 1)
-            await edit_tg_msg(chat_id, msg_id, "🎛 <b>فلاتر:</b>", get_filters_keyboard())
+        # نافذة البحث
+        elif d == "inc_lookback":
+            bot_state['comp_lookback'] = min(bot_state['comp_lookback']+1, 10)
+            await edit_tg_msg(chat_id, msg_id, "🎛 <b>فلاتر COMPOSITE:</b>", get_filters_keyboard())
+        elif d == "dec_lookback":
+            bot_state['comp_lookback'] = max(bot_state['comp_lookback']-1, 1)
+            await edit_tg_msg(chat_id, msg_id, "🎛 <b>فلاتر COMPOSITE:</b>", get_filters_keyboard())
+        elif d == "inc_fwd":
+            bot_state['comp_tolerance_fwd'] = min(bot_state['comp_tolerance_fwd']+1, 10)
+            await edit_tg_msg(chat_id, msg_id, "🎛 <b>فلاتر COMPOSITE:</b>", get_filters_keyboard())
+        elif d == "dec_fwd":
+            bot_state['comp_tolerance_fwd'] = max(bot_state['comp_tolerance_fwd']-1, 1)
+            await edit_tg_msg(chat_id, msg_id, "🎛 <b>فلاتر COMPOSITE:</b>", get_filters_keyboard())
 
         # فلاتر الوقت
         elif d == "toggle_time":
@@ -1694,7 +1635,7 @@ async def process_tg_update(update):
         elif d.startswith("toggle_tf_"):
             tf = d.split("_")[2]
             bot_state['active_tfs'][tf] = not bot_state['active_tfs'][tf]
-            bot_state['setup_state'][tf] = {'buy_active': False, 'sell_active': False, 'buy_zone': '', 'sell_zone': '', 'buy_zone_lvl': 0, 'sell_zone_lvl': 0, 'buy_wait': 0, 'sell_wait': 0, 'macd_touched': False, 'osma_touched': False}
+            bot_state['setup_state'][tf] = {'buy_active': False, 'sell_active': False, 'buy_fire_idx': 0, 'sell_fire_idx': 0, 'buy_wait': 0, 'sell_wait': 0}
             await edit_tg_msg(chat_id, msg_id, "⏱ إدارة الفريمات:", get_tf_keyboard())
 
         # ── Settings ──
@@ -1733,7 +1674,7 @@ async def process_tg_update(update):
                     lines.append(f"[{tf}] {md}\n"
                                  f"       B:{('🟡' if st['buy_active'] else '⬜')} "
                                  f"S:{('🟡' if st['sell_active'] else '⬜')} "
-                                 f"Bwait:{st['buy_wait']} Swait:{st['sell_wait']}")
+                                 f"B_fire:{st.get('buy_fire_idx',0)} S_fire:{st.get('sell_fire_idx',0)}")
                 else:
                     lines.append(f"[{tf}] {md}")
             txt = f"📊 <b>حالة السوق الحية — {_strat_label()}</b>\n" + "\n".join(lines)
