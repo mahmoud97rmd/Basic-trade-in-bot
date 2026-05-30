@@ -390,6 +390,7 @@ def _run_composite_state(state: dict, curr: pd.Series, prev: pd.Series,
         state['sell_stoch_wait'] = 999
 
     label = b_label if buy_sig else s_label
+    return buy_sig, sell_sig, label
 
 
 def evaluate_composite_live(tf: str, curr: pd.Series, prev: pd.Series,
