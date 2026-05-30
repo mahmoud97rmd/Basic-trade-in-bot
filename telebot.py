@@ -661,7 +661,7 @@ async def run_advanced_backtest(days=7):
                         if vc['low']  <= sl_p:   outcome = "BREAK-EVEN" if be_act else "LOSS"; exit_t = vc['time']; break
                         if vc['high'] >= eff_tp:  outcome = "WIN"; exit_t = vc['time']; break
                     else:
-                        if bot_state['use_be'] and not be_act fountains and vc['low'] <= be_tgt: sl_p = act_ent; be_act = True
+                        if bot_state['use_be'] and not be_act and vc['low'] <= be_tgt: sl_p = act_ent; be_act = True
                         if vc['high'] >= sl_p:   outcome = "BREAK-EVEN" if be_act else "LOSS"; exit_t = vc['time']; break
                         if vc['low']  <= eff_tp:  outcome = "WIN"; exit_t = vc['time']; break
 
