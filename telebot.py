@@ -12,7 +12,7 @@ from aiohttp import web
 # =============================================================
 METAAPI_TOKEN = 'eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9..NRMo-BO9ezZBEb4XmCQzkMsRN1iAz1rVSk7XWFP-ZGS_AZEyxSfIjnJ5w-r4egazV7tnxNLjjMuAdUb25T3ur3XWKCL4Jo9LFPy9tZzhIMRtlhq8d6YAHK9uxJclqJv5BZQFDeMeiFtyalLNjaE100Lp2zEnGWwlloxF-dpCw5DXvVKeGfMyVx4L2kisshcysDo7OeMkDBU1UB7leHi2eviEl7XQCpmhxdzT4BwMkf8YERx2jouKVu8-koVy00aon0drktGBSlQDOFw2WV0hg-VUfeCBR_Hgw2czqKVJ_lj_ZN3EsjWirirpiuXWbtwdD-VPokjKtX1z3ugcSTS1nd2iFIzauUHdOfb7Jl0R6cm8FosVS-4Iu046DiMsrxiAJ4PBywOXQhsFzZiePqmil1w5HHCxrw_78HNR9XcjBETMpHx9W48llIeUOkBVbsKfBP5iYtGSjS52i0QgpvHkfKrtXfbkMT0_9yJFG2kfZJHwJ5BJzWT4aKXto3l6iGe45xe4ZJhYhZX_RkC6dxR2w84M-uY-wlqiv_sxjHNOguSyOx4lfaeoq5H-LuJiWpHAYxEJUQWoQAQ7PObZOXCDWLRc_vP2gcbv1qYxTjD54FHnqhyf-oTGzAkWG5CVQFKpp9jTHQ3pXEYTSgIUTfHDbtoesAY1HG3nHcHbwujnqo0'
 ACCOUNT_ID    = '7d54fa6f-eaf7-4637-92a1-e0356ee729f8'
-TG_TOKEN      = '8647261254:AAH7AyzhBYvc9QjGmzgFW7NBb0a_SOAYCjc'
+TG_TOKEN      = '8779425898:AAG2tyWLIasXmvFlTWjf9tqWuHO08QHJvgk'
 OANDA_ID      = '101-001-39389982-001'
 OANDA_API     = 'd05b25b3f1ce0c8fa105ffefa45efb01-a5c26f544a26a4f810f1809913a2795f'
 OANDA_URL     = 'https://api-fxtrade.oanda.com/v3'
@@ -473,8 +473,10 @@ async def fetch_oanda_candles(instrument, granularity, count=5000, end_time=None
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get(url, headers=headers, params=params) as resp:
+                body = await resp.text()
                 if resp.status == 200:
-                    data = await resp.json()
+                    import json as _json
+                    data = _json.loads(body)
                     return [
                         {'time':  pd.to_datetime(c['time'], utc=True),
                          'open':  float(c['mid']['o']),
@@ -483,8 +485,20 @@ async def fetch_oanda_candles(instrument, granularity, count=5000, end_time=None
                          'close': float(c['mid']['c'])}
                         for c in data.get('candles', []) if c['complete']
                     ]
+                else:
+                    err_msg = f"OANDA {resp.status}: {body[:300]}"
+                    c_log(f"❌ {err_msg}")
+                    # أرسل الخطأ لتيليجرام إذا كان chat_id متاحاً
+                    if bot_state.get('chat_id'):
+                        asyncio.create_task(send_tg_msg(
+                            f"❌ <b>OANDA API Error</b>\n"
+                            f"Status: {resp.status}\n"
+                            f"URL: {instrument}/{granularity}\n"
+                            f"<code>{body[:200]}</code>"))
         except Exception as e:
             c_log(f"❌ خطأ Oanda: {e}")
+            if bot_state.get('chat_id'):
+                asyncio.create_task(send_tg_msg(f"❌ OANDA Exception: {e}"))
     return []
 
 
@@ -868,10 +882,7 @@ async def run_oanda_backtest(start_dt):
             trig_zones = '+'.join([z for z,v in [('DEEP',bot_state['comp_use_deep']),
                                                   ('MID', bot_state['comp_use_mid']),
                                                   ('SHAL',bot_state['comp_use_shal'])] if v]) or 'none'
-            dom_check  = 'DomBar:ON' if bot_state.get('comp_check_dominant_bar') else 'DomBar:OFF'
-            fire_zones = '+'.join([z for z,v in [('RSI≤10/≥90', bot_state['comp_rsi_level_10']),
-                                                  ('RSI≤20/≥80', bot_state['comp_rsi_level_20'])] if v]) or 'none'
-            fire_zones += f' | {dom_check}'
+            adv_fire = f"MACD/OsMA≥10 | LB={bot_state['comp_lookback']} FWD={bot_state['comp_tolerance_fwd']}"
             strat_detail = f"{tol_desc} | Trigger:{trig_zones} | Fire:{fire_zones}"
         else:
             strat_detail = tol_desc
@@ -1241,9 +1252,7 @@ async def run_advanced_backtest(days=7):
             adv_trig = '+'.join([z for z,v in [('DEEP',bot_state['comp_use_deep']),
                                                 ('MID', bot_state['comp_use_mid']),
                                                 ('SHAL',bot_state['comp_use_shal'])] if v]) or 'none'
-            adv_dom  = 'DomBar:ON' if bot_state.get('comp_check_dominant_bar') else 'DomBar:OFF'
-            adv_fire = '+'.join([z for z,v in [('RSI≤10/≥90', bot_state['comp_rsi_level_10']),
-                                                ('RSI≤20/≥80', bot_state['comp_rsi_level_20'])] if v]) or 'none'
+            adv_fire = f"MACD/OsMA≥10 | LB={bot_state['comp_lookback']} FWD={bot_state['comp_tolerance_fwd']}"
             adv_fire += f' | {adv_dom}'
         else:
             adv_trig = adv_fire = 'N/A'
@@ -1582,15 +1591,7 @@ async def process_tg_update(update):
             bot_state['comp_use_shal']  = not bot_state['comp_use_shal'];  _reset_composite_states()
             await edit_tg_msg(chat_id, msg_id, "🎛 <b>فلاتر COMPOSITE:</b>", get_filters_keyboard())
         # مستويات RSI2 للـ fire
-        elif d == "toggle_comp_rsi10":
-            bot_state['comp_rsi_level_10'] = not bot_state['comp_rsi_level_10']
-            await edit_tg_msg(chat_id, msg_id, "🎛 <b>فلاتر COMPOSITE:</b>", get_filters_keyboard())
-        elif d == "toggle_comp_rsi20":
-            bot_state['comp_rsi_level_20'] = not bot_state['comp_rsi_level_20']
-            await edit_tg_msg(chat_id, msg_id, "🎛 <b>فلاتر COMPOSITE:</b>", get_filters_keyboard())
-        elif d == "toggle_comp_dominant":
-            bot_state['comp_check_dominant_bar'] = not bot_state['comp_check_dominant_bar']
-            await edit_tg_msg(chat_id, msg_id, "🎛 <b>فلاتر COMPOSITE:</b>", get_filters_keyboard())
+
         # نافذة البحث
         elif d == "inc_lookback":
             bot_state['comp_lookback'] = min(bot_state['comp_lookback']+1, 10)
