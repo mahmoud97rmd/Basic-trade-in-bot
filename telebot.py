@@ -1,5 +1,5 @@
 """
-Gold Scalper Bot — v5.1 (Live Tracking & Async Lock Fixed)
+Gold Scalper Bot — v5.2 (Live Tracking & Progress Bar)
 Strategies : STOCH-NEW  |  STOCH-OLD  |  RSI-REVERSAL
 """
 
@@ -24,6 +24,13 @@ OANDA_API     = 'd05b25b3f1ce0c8fa105ffefa45efb01-a5c26f544a26a4f810f1809913a279
 OANDA_URL     = 'https://api-fxpractice.oanda.com/v3'
 
 _TFS = ['1m', '2m', '3m', '5m', '15m']
+
+# ─────────────────────────────────────────────────────────────
+# PROGRESS BAR HELPER
+# ─────────────────────────────────────────────────────────────
+def make_progress_bar(pct: int, length: int = 12) -> str:
+    filled = int(length * (pct / 100))
+    return '█' * filled + '░' * (length - filled)
 
 # ─────────────────────────────────────────────────────────────
 # GLOBAL SHARED HTTP SESSION
@@ -59,20 +66,17 @@ bot_state: dict = {
     'sl_pips':           {'1m': 100, '2m': 100, '3m': 100, '5m': 100, '15m': 150},
     'strategy_mode':     'STOCH_OLD',
     'filter_mode':       'NO_MA',
-    # Stoch Params
     'stoch_k':           5,
     'stoch_smooth':      5,
     'stoch_d':           5,
     'use_stoch_deep':    True,
     'use_stoch_mid':     True,
     'use_stoch_shal':    False,
-    # RSI Params
     'rsi_period':        14,
     'use_rsi_18':        True,
     'use_rsi_25':        False,
     'use_rsi_77':        False,
     'use_rsi_83':        True,
-    # General Filters
     'use_f_cons':        False,
     'cons_count':        3,
     'use_time_filter':   False,
@@ -254,7 +258,7 @@ async def fetch_oanda_candles(instrument: str, granularity: str, count: int = 50
     return []
 
 # ─────────────────────────────────────────────────────────────
-# TELEGRAM HELPERS (MODIFIED FOR MESSAGE TRACKING)
+# TELEGRAM HELPERS
 # ─────────────────────────────────────────────────────────────
 async def send_tg_msg(text: str, reply_markup: dict = None) -> int | None:
     if not bot_state['chat_id']: return None
@@ -289,18 +293,27 @@ async def answer_callback(cbq_id: str, text: str = None, show_alert: bool = Fals
     except Exception:
         pass
 
-async def send_tg_document(file_path: str, caption: str) -> None:
-    if not bot_state['chat_id']: return
+async def send_tg_document(file_path: str, caption: str) -> bool:
+    """Returns True if document sent successfully, False otherwise."""
+    if not bot_state['chat_id']: return False
     try:
         with open(file_path, 'rb') as f:
             data = aiohttp.FormData()
             data.add_field('chat_id', str(bot_state['chat_id']))
             data.add_field('document', f, filename=os.path.basename(file_path))
             data.add_field('caption', caption, parse_mode='HTML')
-            async with get_http().post(f'https://api.telegram.org/bot{TG_TOKEN}/sendDocument', data=data) as resp:
-                pass
+            
+            # زيادة وقت الانتظار تحسباً للملفات الكبيرة
+            timeout = aiohttp.ClientTimeout(total=60)
+            async with get_http().post(f'https://api.telegram.org/bot{TG_TOKEN}/sendDocument', data=data, timeout=timeout) as resp:
+                if resp.status == 200:
+                    return True
+                else:
+                    c_log(f'TG doc upload failed: {resp.status} - {await resp.text()}')
+                    return False
     except Exception as e:
         c_log(f'TG doc error: {e}')
+        return False
 
 # ─────────────────────────────────────────────────────────────
 # KEYBOARDS
@@ -501,7 +514,7 @@ def _entry_params(curr: pd.Series, is_buy: bool, tf: str) -> tuple:
     return act_ent, tp_p, sl_p, eff_tp
 
 # ─────────────────────────────────────────────────────────────
-# STANDARD BACKTEST (WITH LIVE TRACKING)
+# STANDARD BACKTEST (WITH LIVE PROGRESS BAR)
 # ─────────────────────────────────────────────────────────────
 async def run_oanda_backtest(start_dt: datetime) -> None:
     desc  = f"{bot_state['strategy_mode']} / {bot_state['filter_mode']}"
@@ -512,7 +525,6 @@ async def run_oanda_backtest(start_dt: datetime) -> None:
 
     async def update_status(extra: str):
         if msg_id: await edit_tg_msg(bot_state['chat_id'], msg_id, f'{status_text}\n\n{extra}')
-        else: await send_tg_msg(extra)
 
     trade_logs, blocked_logs = [], []
     total_prof = peak_equity = max_dd = total_win = total_loss = 0.0
@@ -525,7 +537,6 @@ async def run_oanda_backtest(start_dt: datetime) -> None:
             await update_status(f'🔄 <b>[{tf}]</b>: جاري جلب الشموع الأساسية للمحاكاة...')
             c_data = await fetch_oanda_candles('XAU_USD', tf, 5000)
             if len(c_data) < 300: 
-                await update_status(f'⚠️ <b>[{tf}]</b>: تم التخطي (البيانات المتوفرة غير كافية: {len(c_data)} شمعة)')
                 await asyncio.sleep(2)
                 continue
 
@@ -535,7 +546,7 @@ async def run_oanda_backtest(start_dt: datetime) -> None:
             tf_end    = datetime.now(timezone.utc)
             total_min = int((tf_end - start_dt).total_seconds() / 60) + 72 * 60
             
-            await update_status(f'📥 <b>[{tf}]</b>: جاري جلب شموع دقيقة (1m) لضمان دقة الأهداف (الكمية المطلوبة: {total_min})...')
+            await update_status(f'📥 <b>[{tf}]</b>: جاري جلب شموع دقيقة (1m) لضمان الدقة...')
             m1_raw = []
             current_end = tf_end
             fetched = 0
@@ -546,7 +557,7 @@ async def run_oanda_backtest(start_dt: datetime) -> None:
                 m1_raw = cndls + m1_raw
                 
                 new_end = cndls[0]['time']
-                if new_end >= current_end: break # Safety break to avoid infinite loop
+                if new_end >= current_end: break 
                 current_end = new_end
                 
                 fetched += len(cndls)
@@ -555,10 +566,21 @@ async def run_oanda_backtest(start_dt: datetime) -> None:
 
             minute_candles = sorted(m1_raw, key=lambda x: x['time'])
 
-            await update_status(f'⚙️ <b>[{tf}]</b>: بدء فحص الإشارات ومحاكاة الصفقات (إجمالي الشموع المتاحة: {len(df)})...')
-            for i in df[df['time'] >= start_dt].index:
+            # ── PROGRESS BAR LOGIC ──
+            valid_indices = df[df['time'] >= start_dt].index
+            total_candles = len(valid_indices)
+            if total_candles == 0: continue
+            
+            step = max(1, total_candles // 10) # Update every 10%
+
+            for idx, i in enumerate(valid_indices):
                 if i < safe_start: continue
-                if i % 50 == 0: await asyncio.sleep(0)
+                if idx % 50 == 0: await asyncio.sleep(0)
+
+                if idx % step == 0 or idx == total_candles - 1:
+                    pct = int((idx / total_candles) * 100)
+                    bar = make_progress_bar(pct)
+                    await update_status(f'⚙️ <b>[{tf}]</b>: جاري فحص الإشارات...\n<code>{bar} {pct}%</code>\n(شمعة {idx}/{total_candles})')
 
                 curr, prev, prev2 = df.loc[i], df.loc[i - 1], df.loc[i - 2]
                 if bot_state['use_time_filter'] and not (8 <= curr['time'].hour <= 17): continue
@@ -596,7 +618,7 @@ async def run_oanda_backtest(start_dt: datetime) -> None:
             await update_status('⚠️ لم يتم العثور على أي صفقات خلال هذه الفترة.')
             return
 
-        await update_status('✅ <b>اكتمل الفحص لجميع الفريمات!</b> جاري تحضير ملف الإكسل والتقرير النهائي...')
+        await update_status('✅ <b>اكتمل الفحص!</b>\nجاري الآن بناء وتجهيز ملف الإكسل (Excel)...')
         
         total_trades = win_count + loss_count
         win_rate     = round(win_count / total_trades * 100, 1) if total_trades else 0
@@ -605,14 +627,26 @@ async def run_oanda_backtest(start_dt: datetime) -> None:
             'القيمة': [f'{win_count} | +${round(total_win, 2)}', f'{loss_count} | -${abs(round(total_loss, 2))}', f'${round(total_prof, 2)}', f'{win_rate}% ({total_trades} صفقة)', f'${round(max_dd, 2)}', str(be_count), desc],
         }
 
-        with pd.ExcelWriter(fname, engine='openpyxl') as writer:
-            pd.DataFrame(trade_logs).to_excel(writer, sheet_name='الصفقات', index=False)
-            pd.DataFrame(summary).to_excel(writer, sheet_name='الملخص', index=False)
-            if blocked_logs:
-                pd.DataFrame(blocked_logs).to_excel(writer, sheet_name='المرفوضة', index=False)
-            _style_sheet(writer.sheets['الصفقات'])
+        try:
+            with pd.ExcelWriter(fname, engine='openpyxl') as writer:
+                pd.DataFrame(trade_logs).to_excel(writer, sheet_name='الصفقات', index=False)
+                pd.DataFrame(summary).to_excel(writer, sheet_name='الملخص', index=False)
+                if blocked_logs:
+                    pd.DataFrame(blocked_logs).to_excel(writer, sheet_name='المرفوضة', index=False)
+                _style_sheet(writer.sheets['الصفقات'])
+        except Exception as excel_err:
+            await update_status(f'❌ <b>فشل في بناء ملف الإكسل!</b>\nالخطأ: {excel_err}\n(تأكد من وجود مكتبة openpyxl في السيرفر)')
+            return
 
-        await send_tg_document(fname, f'📊 <b>الباك تيست</b> | {desc}\n✅ +${round(total_win, 2)} | ❌ -${abs(round(total_loss, 2))}\n💰 ${round(total_prof, 2)} | 🎯 {win_rate}%')
+        await update_status('📤 <b>جاري رفع التقرير إلى تيليجرام...</b>\n(قد يستغرق بضع ثوانٍ بسبب حجم الملف)')
+        
+        success = await send_tg_document(fname, f'📊 <b>الباك تيست</b> | {desc}\n✅ +${round(total_win, 2)} | ❌ -${abs(round(total_loss, 2))}\n💰 ${round(total_prof, 2)} | 🎯 {win_rate}%')
+        
+        if success:
+            await update_status('🎉 <b>تم الانتهاء بنجاح!</b> (تم إرسال الملف)')
+        else:
+            await update_status('❌ <b>اكتمل الفحص، لكن فشل إرسال الملف!</b>\n(حجم الملف كبير جداً أو هناك مشكلة في اتصال تيليجرام)')
+            
         os.remove(fname)
 
     except Exception as e:
@@ -623,7 +657,7 @@ async def run_oanda_backtest(start_dt: datetime) -> None:
         bot_state['is_backtesting'] = False
 
 # ─────────────────────────────────────────────────────────────
-# ADVANCED BACKTEST (WITH LIVE TRACKING)
+# ADVANCED BACKTEST (WITH LIVE PROGRESS BAR)
 # ─────────────────────────────────────────────────────────────
 async def run_advanced_backtest(days: int = 7) -> None:
     desc     = f"{bot_state['strategy_mode']} / {bot_state['filter_mode']}"
@@ -634,7 +668,6 @@ async def run_advanced_backtest(days: int = 7) -> None:
 
     async def update_status(extra: str):
         if msg_id: await edit_tg_msg(bot_state['chat_id'], msg_id, f'{status_text}\n\n{extra}')
-        else: await send_tg_msg(extra)
 
     trade_logs = []
     total_prof = peak_equity = max_dd = total_win = total_loss = 0.0
@@ -647,7 +680,6 @@ async def run_advanced_backtest(days: int = 7) -> None:
             await update_status(f'🔄 <b>[{tf}]</b>: جاري جلب الشموع الأساسية للمحاكاة...')
             c_data = await fetch_oanda_candles('XAU_USD', tf, 5000)
             if len(c_data) < 300: 
-                await update_status(f'⚠️ <b>[{tf}]</b>: تم التخطي (البيانات المتوفرة غير كافية)')
                 await asyncio.sleep(2)
                 continue
 
@@ -657,7 +689,7 @@ async def run_advanced_backtest(days: int = 7) -> None:
             tf_end    = datetime.now(timezone.utc)
             total_min = int((tf_end - start_dt).total_seconds() / 60) + 72 * 60
             
-            await update_status(f'📥 <b>[{tf}]</b>: جاري جلب شموع دقيقة (1m) لضمان دقة الأهداف (الكمية المطلوبة: {total_min})...')
+            await update_status(f'📥 <b>[{tf}]</b>: جاري جلب شموع دقيقة (1m) لضمان الدقة...')
             m1_raw = []
             current_end = tf_end
             fetched = 0
@@ -668,7 +700,7 @@ async def run_advanced_backtest(days: int = 7) -> None:
                 m1_raw = cndls + m1_raw
                 
                 new_end = cndls[0]['time']
-                if new_end >= current_end: break # Safety break
+                if new_end >= current_end: break 
                 current_end = new_end
                 
                 fetched += len(cndls)
@@ -677,10 +709,21 @@ async def run_advanced_backtest(days: int = 7) -> None:
 
             minute_candles = sorted(m1_raw, key=lambda x: x['time'])
 
-            await update_status(f'⚙️ <b>[{tf}]</b>: بدء فحص الإشارات ومحاكاة الصفقات (إجمالي الشموع المتاحة: {len(df)})...')
-            for i in df[df['time'] >= start_dt].index:
+            # ── PROGRESS BAR LOGIC ──
+            valid_indices = df[df['time'] >= start_dt].index
+            total_candles = len(valid_indices)
+            if total_candles == 0: continue
+            
+            step = max(1, total_candles // 10)
+
+            for idx, i in enumerate(valid_indices):
                 if i < safe_start: continue
-                if i % 50 == 0: await asyncio.sleep(0)
+                if idx % 50 == 0: await asyncio.sleep(0)
+
+                if idx % step == 0 or idx == total_candles - 1:
+                    pct = int((idx / total_candles) * 100)
+                    bar = make_progress_bar(pct)
+                    await update_status(f'⚙️ <b>[{tf}]</b>: جاري فحص الإشارات...\n<code>{bar} {pct}%</code>\n(شمعة {idx}/{total_candles})')
 
                 curr, prev, prev2 = df.loc[i], df.loc[i - 1], df.loc[i - 2]
                 if bot_state['use_time_filter'] and not (8 <= curr['time'].hour <= 17): continue
@@ -711,7 +754,7 @@ async def run_advanced_backtest(days: int = 7) -> None:
             await update_status('⚠️ لم يتم العثور على صفقات خلال هذه الفترة.')
             return
 
-        await update_status('✅ <b>اكتمل الفحص لجميع الفريمات!</b> جاري تحضير ملف الإكسل والتقرير النهائي...')
+        await update_status('✅ <b>اكتمل الفحص!</b>\nجاري الآن بناء وتجهيز ملف الإكسل (Excel)...')
         total_trades = win_count + loss_count
         win_rate     = round(win_count / total_trades * 100, 1) if total_trades else 0
         pf           = round(total_win / abs(total_loss), 2) if total_loss else 999.0
@@ -726,11 +769,24 @@ async def run_advanced_backtest(days: int = 7) -> None:
 
         xlsx_adv = f"ADV_{datetime.now().strftime('%H%M%S')}.xlsx"
         df_exec  = pd.DataFrame(trade_logs)
-        with pd.ExcelWriter(xlsx_adv, engine='openpyxl') as writer:
-            df_exec.to_excel(writer, sheet_name='الصفقات', index=False)
-            _style_sheet(writer.sheets['الصفقات'])
+        
+        try:
+            with pd.ExcelWriter(xlsx_adv, engine='openpyxl') as writer:
+                df_exec.to_excel(writer, sheet_name='الصفقات', index=False)
+                _style_sheet(writer.sheets['الصفقات'])
+        except Exception as excel_err:
+            await update_status(f'❌ <b>فشل في بناء ملف الإكسل!</b>\nالخطأ: {excel_err}\n(تأكد من وجود مكتبة openpyxl في السيرفر)')
+            return
 
-        await send_tg_document(xlsx_adv, f'📊 Advanced Report | {desc}')
+        await update_status('📤 <b>جاري رفع التقرير إلى تيليجرام...</b>\n(قد يستغرق بضع ثوانٍ بسبب حجم الملف)')
+        
+        success = await send_tg_document(xlsx_adv, f'📊 Advanced Report | {desc}')
+        
+        if success:
+            await update_status('🎉 <b>تم الانتهاء بنجاح!</b> (تم إرسال الملف)')
+        else:
+            await update_status('❌ <b>اكتمل الفحص، لكن فشل إرسال الملف!</b>\n(حجم الملف كبير جداً أو هناك مشكلة في اتصال تيليجرام)')
+            
         os.remove(xlsx_adv)
 
     except Exception as e:
@@ -836,7 +892,7 @@ async def process_tg_update(update: dict) -> None:
         bot_state['chat_id'] = update['message']['chat']['id']
 
         if msg == '/start':
-            await send_tg_msg('🤖 <b>Gold Scalper Bot v5.1</b>\nالاستراتيجيات المتاحة: STOCH-NEW | STOCH-OLD | RSI-REVERSAL', get_main_keyboard())
+            await send_tg_msg('🤖 <b>Gold Scalper Bot v5.2</b>\nالاستراتيجيات المتاحة: STOCH-NEW | STOCH-OLD | RSI-REVERSAL', get_main_keyboard())
         elif msg.startswith('/backtest'):
             if bot_state['is_backtesting']:
                 await send_tg_msg('⚠️ <b>عذراً:</b> البوت يقوم بباك تيست حالياً. الرجاء الانتظار حتى ينتهي.')
@@ -854,7 +910,6 @@ async def process_tg_update(update: dict) -> None:
     bot_state['chat_id'] = chat_id
 
     try:
-        # ── Navigation & Settings ──────────────────────────────────
         if d == 'noop': pass
         elif d == 'menu_main': await edit_tg_msg(chat_id, msg_id, '🏠 القائمة الرئيسية:', get_main_keyboard())
         elif d == 'menu_filters': await edit_tg_msg(chat_id, msg_id, '🎛 <b>فلاتر وإعدادات التداول:</b>', get_filters_keyboard())
@@ -872,27 +927,20 @@ async def process_tg_update(update: dict) -> None:
             bot_state['strategy_mode'] = modes[(modes.index(bot_state['strategy_mode']) + 1) % len(modes)]
             await edit_tg_msg(chat_id, msg_id, '🏠 القائمة الرئيسية:', get_main_keyboard())
 
-        # ── Time Filters ───────────────────────────────────────────
         elif d == 'toggle_time':
-            bot_state['use_time_filter'] = not bot_state['use_time_filter']
-            await edit_tg_msg(chat_id, msg_id, '🎛 الفلاتر:', get_filters_keyboard())
+            bot_state['use_time_filter'] = not bot_state['use_time_filter']; await edit_tg_msg(chat_id, msg_id, '🎛 الفلاتر:', get_filters_keyboard())
         elif d == 'toggle_danger':
-            bot_state['use_danger_filter'] = not bot_state['use_danger_filter']
-            await edit_tg_msg(chat_id, msg_id, '🎛 الفلاتر:', get_filters_keyboard())
+            bot_state['use_danger_filter'] = not bot_state['use_danger_filter']; await edit_tg_msg(chat_id, msg_id, '🎛 الفلاتر:', get_filters_keyboard())
 
-        # ── Timeframe Toggles ──────────────────────────────────────
         elif d.startswith('toggle_tf_'):
             tf = d.split('_')[2]
-            if tf in bot_state['active_tfs']:
-                bot_state['active_tfs'][tf] = not bot_state['active_tfs'][tf]
+            if tf in bot_state['active_tfs']: bot_state['active_tfs'][tf] = not bot_state['active_tfs'][tf]
             await edit_tg_msg(chat_id, msg_id, '⏱ إدارة الفريمات:', get_tf_keyboard())
 
-        # ── Filter Toggles ─────────────────────────────────────────
         elif d == 'set_filter_full': bot_state['filter_mode'] = 'FULL'; await edit_tg_msg(chat_id, msg_id, '🎛 الفلاتر:', get_filters_keyboard())
         elif d == 'set_filter_simple': bot_state['filter_mode'] = 'SIMPLE'; await edit_tg_msg(chat_id, msg_id, '🎛 الفلاتر:', get_filters_keyboard())
         elif d == 'set_filter_noma': bot_state['filter_mode'] = 'NO_MA'; await edit_tg_msg(chat_id, msg_id, '🎛 الفلاتر:', get_filters_keyboard())
         
-        # ── Stochastic Settings ────────────────────────────────────
         elif d == 'toggle_stoch_deep': bot_state['use_stoch_deep'] = not bot_state['use_stoch_deep']; await edit_tg_msg(chat_id, msg_id, '⚙️ إعدادات الستوكاستيك:', get_stoch_settings_keyboard())
         elif d == 'toggle_stoch_mid': bot_state['use_stoch_mid'] = not bot_state['use_stoch_mid']; await edit_tg_msg(chat_id, msg_id, '⚙️ إعدادات الستوكاستيك:', get_stoch_settings_keyboard())
         elif d == 'toggle_stoch_shal': bot_state['use_stoch_shal'] = not bot_state['use_stoch_shal']; await edit_tg_msg(chat_id, msg_id, '⚙️ إعدادات الستوكاستيك:', get_stoch_settings_keyboard())
@@ -904,31 +952,18 @@ async def process_tg_update(update: dict) -> None:
         elif d == 'inc_stoch_d': bot_state['stoch_d'] = min(bot_state['stoch_d'] + 1, 100); await edit_tg_msg(chat_id, msg_id, '⚙️ إعدادات الستوكاستيك:', get_stoch_settings_keyboard())
         elif d == 'dec_stoch_d': bot_state['stoch_d'] = max(bot_state['stoch_d'] - 1, 1); await edit_tg_msg(chat_id, msg_id, '⚙️ إعدادات الستوكاستيك:', get_stoch_settings_keyboard())
 
-        # ── RSI Settings ───────────────────────────────────────────
         elif d.startswith('toggle_rsi_'):
             level = d.split('_')[2]
             key = f'use_rsi_{level}'
             bot_state[key] = not bot_state[key]
             await edit_tg_msg(chat_id, msg_id, '📈 <b>إعدادات استراتيجية RSI:</b>', get_rsi_settings_keyboard())
 
-        # ── Risk Settings ──────────────────────────────────────────
-        elif d == 'toggle_be':
-            bot_state['use_be'] = not bot_state['use_be']
-            await edit_tg_msg(chat_id, msg_id, '🛠 إعدادات المخاطرة:', get_settings_keyboard())
-        elif d == 'toggle_atr':
-            bot_state['use_atr'] = not bot_state['use_atr']
-            await edit_tg_msg(chat_id, msg_id, '🛠 إعدادات المخاطرة:', get_settings_keyboard())
-        elif d == 'toggle_spread':
-            bot_state['use_max_spread'] = not bot_state['use_max_spread']
-            await edit_tg_msg(chat_id, msg_id, '🛠 إعدادات المخاطرة:', get_settings_keyboard())
-        elif d == 'inc_lot':
-            bot_state['lot_size'] = round(bot_state['lot_size'] + 0.01, 2)
-            await edit_tg_msg(chat_id, msg_id, '🛠 إعدادات المخاطرة:', get_settings_keyboard())
-        elif d == 'dec_lot':
-            bot_state['lot_size'] = max(0.01, round(bot_state['lot_size'] - 0.01, 2))
-            await edit_tg_msg(chat_id, msg_id, '🛠 إعدادات المخاطرة:', get_settings_keyboard())
+        elif d == 'toggle_be': bot_state['use_be'] = not bot_state['use_be']; await edit_tg_msg(chat_id, msg_id, '🛠 إعدادات المخاطرة:', get_settings_keyboard())
+        elif d == 'toggle_atr': bot_state['use_atr'] = not bot_state['use_atr']; await edit_tg_msg(chat_id, msg_id, '🛠 إعدادات المخاطرة:', get_settings_keyboard())
+        elif d == 'toggle_spread': bot_state['use_max_spread'] = not bot_state['use_max_spread']; await edit_tg_msg(chat_id, msg_id, '🛠 إعدادات المخاطرة:', get_settings_keyboard())
+        elif d == 'inc_lot': bot_state['lot_size'] = round(bot_state['lot_size'] + 0.01, 2); await edit_tg_msg(chat_id, msg_id, '🛠 إعدادات المخاطرة:', get_settings_keyboard())
+        elif d == 'dec_lot': bot_state['lot_size'] = max(0.01, round(bot_state['lot_size'] - 0.01, 2)); await edit_tg_msg(chat_id, msg_id, '🛠 إعدادات المخاطرة:', get_settings_keyboard())
 
-        # ── TP / SL Edits ──────────────────────────────────────────
         elif d == 'view_tpsl': await edit_tg_msg(chat_id, msg_id, '🎯 <b>تعديل TP / SL:</b>', get_tpsl_overview_keyboard())
         elif d.startswith('tpsl_edit_'): await edit_tg_msg(chat_id, msg_id, f'✏️ <b>تعديل [{d[10:]}]:</b>', get_tpsl_edit_keyboard(d[10:]))
         elif any(d.startswith(prefix) for prefix in ('inc_tp', 'dec_tp', 'inc_sl', 'dec_sl')):
@@ -937,22 +972,18 @@ async def process_tg_update(update: dict) -> None:
                 bot_state[t_key][tf] = bot_state[t_key][tf] + step if p[0] == 'inc' else max(5, bot_state[t_key][tf] - step)
                 await edit_tg_msg(chat_id, msg_id, f'✏️ <b>تعديل [{tf}]:</b>', get_tpsl_edit_keyboard(tf))
         
-        # ── Backtest Triggers (LOCKED & PROTECTED) ─────────────────
         elif d.startswith('bto_adv_'):
-            if bot_state['is_backtesting']:
-                await answer_callback(q['id'], '⚠️ عذراً: البوت يقوم بباك تيست حالياً! الرجاء الانتظار.', show_alert=True)
+            if bot_state['is_backtesting']: await answer_callback(q['id'], '⚠️ البوت يقوم بباك تيست حالياً! الرجاء الانتظار.', show_alert=True)
             else:
                 bot_state['is_backtesting'] = True
                 asyncio.create_task(run_advanced_backtest(days=int(d.split('_')[2])))
                 
         elif d.startswith('bto_'):
-            if bot_state['is_backtesting']:
-                await answer_callback(q['id'], '⚠️ عذراً: البوت يقوم بباك تيست حالياً! الرجاء الانتظار.', show_alert=True)
+            if bot_state['is_backtesting']: await answer_callback(q['id'], '⚠️ البوت يقوم بباك تيست حالياً! الرجاء الانتظار.', show_alert=True)
             else:
                 bot_state['is_backtesting'] = True
                 asyncio.create_task(run_oanda_backtest(datetime.now(timezone.utc) - timedelta(days=int(d.split('_')[1]))))
         
-        # ── Live Connection & Reports ──────────────────────────────
         elif d == 'toggle_live_conn':
             if not bot_state['live_connected']:
                 await edit_tg_msg(chat_id, msg_id, '⏳ جاري الاتصال بالسيرفر...', get_main_keyboard())
@@ -975,8 +1006,7 @@ async def process_tg_update(update: dict) -> None:
         elif d == 'report':
             lines = [f'📊 <b>حالة السوق الحية — {_strat_label()}</b>']
             for tf in bot_state['timeframes']:
-                if bot_state['active_tfs'][tf]:
-                    lines.append(f'[{tf}] {bot_state["market_data"][tf]}')
+                if bot_state['active_tfs'][tf]: lines.append(f'[{tf}] {bot_state["market_data"][tf]}')
             await edit_tg_msg(chat_id, msg_id, '\n'.join(lines), get_main_keyboard())
             
         elif d == 'account':
@@ -995,10 +1025,8 @@ async def process_tg_update(update: dict) -> None:
                     await send_tg_msg(f'✅ تم إغلاق {len(pos)} صفقة.')
                 except Exception as e: await send_tg_msg(f'❌ خطأ: {e}')
                 
-    except Exception as e:
-        c_log(f'Callback Error: {e}')
-    finally:
-        await answer_callback(q['id'])
+    except Exception as e: c_log(f'Callback Error: {e}')
+    finally: await answer_callback(q['id'])
 
 # ─────────────────────────────────────────────────────────────
 # CORE LOOPS
@@ -1014,8 +1042,7 @@ async def telegram_polling_loop() -> None:
                         bot_state['last_update_id'] = upd['update_id']
                         asyncio.create_task(process_tg_update(upd))
                 else: await asyncio.sleep(backoff); backoff = min(backoff * 2, 30)
-        except Exception:
-            await asyncio.sleep(backoff); backoff = min(backoff * 2, 30)
+        except Exception: await asyncio.sleep(backoff); backoff = min(backoff * 2, 30)
 
 async def supervised(coro_fn, *args):
     while True:
@@ -1024,7 +1051,7 @@ async def supervised(coro_fn, *args):
 
 _start_time = datetime.now(timezone.utc)
 async def handle_ping(request: web.Request) -> web.Response:
-    return web.Response(text=f'Gold Scalper Bot v5.1 — OK\nUptime: {datetime.now(timezone.utc) - _start_time}', content_type='text/plain')
+    return web.Response(text=f'Gold Scalper Bot v5.2 — OK\nUptime: {datetime.now(timezone.utc) - _start_time}', content_type='text/plain')
 
 async def main() -> None:
     get_http()
