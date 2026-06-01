@@ -1296,252 +1296,252 @@ async def process_tg_update(update: dict) -> None:
             pass
 
     # ── Navigation ────────────────────────────────────────────────
-    elif d == 'menu_main':
-        await edit_tg_msg(chat_id, msg_id, '🏠 القائمة الرئيسية:', get_main_keyboard())
+        elif d == 'menu_main':
+            await edit_tg_msg(chat_id, msg_id, '🏠 القائمة الرئيسية:', get_main_keyboard())
 
-    elif d == 'menu_filters':
-        await edit_tg_msg(chat_id, msg_id, '🎛 <b>فلاتر وإعدادات التداول:</b>', get_filters_keyboard())
+        elif d == 'menu_filters':
+            await edit_tg_msg(chat_id, msg_id, '🎛 <b>فلاتر وإعدادات التداول:</b>', get_filters_keyboard())
 
-    elif d == 'menu_stoch_settings':
-        await edit_tg_msg(chat_id, msg_id, '⚙️ <b>إعدادات الستوكاستيك:</b>', get_stoch_settings_keyboard())
+        elif d == 'menu_stoch_settings':
+            await edit_tg_msg(chat_id, msg_id, '⚙️ <b>إعدادات الستوكاستيك:</b>', get_stoch_settings_keyboard())
 
-    elif d == 'menu_tfs':
-        await edit_tg_msg(chat_id, msg_id, '⏱ إدارة الفريمات الزمنية:', get_tf_keyboard())
+        elif d == 'menu_tfs':
+            await edit_tg_msg(chat_id, msg_id, '⏱ إدارة الفريمات الزمنية:', get_tf_keyboard())
 
-    elif d == 'menu_settings':
-        await edit_tg_msg(chat_id, msg_id, '🛠 إعدادات المخاطرة:', get_settings_keyboard())
+        elif d == 'menu_settings':
+            await edit_tg_msg(chat_id, msg_id, '🛠 إعدادات المخاطرة:', get_settings_keyboard())
 
-    elif d == 'menu_backtest':
-        await edit_tg_msg(chat_id, msg_id, f'🔬 <b>باك تيست</b> — {_strat_label()}', get_backtest_keyboard())
+        elif d == 'menu_backtest':
+            await edit_tg_msg(chat_id, msg_id, f'🔬 <b>باك تيست</b> — {_strat_label()}', get_backtest_keyboard())
 
-    # ── Bot status ────────────────────────────────────────────────
-    elif d == 'toggle_status':
-        bot_state['status'] = 'PAUSED' if bot_state['status'] == 'RUNNING' else 'RUNNING'
-        await edit_tg_msg(chat_id, msg_id, '🏠 القائمة الرئيسية:', get_main_keyboard())
+        # ── Bot status ────────────────────────────────────────────────
+        elif d == 'toggle_status':
+            bot_state['status'] = 'PAUSED' if bot_state['status'] == 'RUNNING' else 'RUNNING'
+            await edit_tg_msg(chat_id, msg_id, '🏠 القائمة الرئيسية:', get_main_keyboard())
 
-    elif d == 'cycle_strategy':
-        modes = ['STOCH_NEW', 'STOCH_OLD']
-        bot_state['strategy_mode'] = modes[(modes.index(bot_state['strategy_mode']) + 1) % len(modes)]
-        await edit_tg_msg(chat_id, msg_id, f'🏠 القائمة الرئيسية:\n📌 الاستراتيجية: {_strat_label()}', get_main_keyboard())
+        elif d == 'cycle_strategy':
+            modes = ['STOCH_NEW', 'STOCH_OLD']
+            bot_state['strategy_mode'] = modes[(modes.index(bot_state['strategy_mode']) + 1) % len(modes)]
+            await edit_tg_msg(chat_id, msg_id, f'🏠 القائمة الرئيسية:\n📌 الاستراتيجية: {_strat_label()}', get_main_keyboard())
 
-    # ── Live connection ───────────────────────────────────────────
-    elif d == 'toggle_live_conn':
-        if not bot_state['live_connected']:
-            await edit_tg_msg(chat_id, msg_id, '⏳ جاري الاتصال بالسيرفر...', get_main_keyboard())
-            try:
-                api = MetaApi(METAAPI_TOKEN)
-                bot_state['account_obj']    = await api.metatrader_account_api.get_account(ACCOUNT_ID)
-                bot_state['connection_obj'] = bot_state['account_obj'].get_rpc_connection()
-                await bot_state['connection_obj'].connect()
-                await bot_state['connection_obj'].wait_synchronized()
-                bot_state['live_connected'] = True
-                await edit_tg_msg(chat_id, msg_id, '✅ تم الاتصال بالسيرفر بنجاح!', get_main_keyboard())
-            except Exception as e:
-                await edit_tg_msg(chat_id, msg_id, f'❌ فشل الاتصال:\n{e}', get_main_keyboard())
-        else:
-            bot_state['live_connected'] = False
-            bot_state['connection_obj'] = None
-            bot_state['account_obj']    = None
-            await edit_tg_msg(chat_id, msg_id, '🔌 تم قطع الاتصال عن السيرفر.', get_main_keyboard())
-
-    # ── MA Filters ────────────────────────────────────────────────
-    elif d == 'set_filter_full':
-        bot_state['filter_mode'] = 'FULL'
-        await edit_tg_msg(chat_id, msg_id, '🎛 الفلاتر:', get_filters_keyboard())
-
-    elif d == 'set_filter_simple':
-        bot_state['filter_mode'] = 'SIMPLE'
-        await edit_tg_msg(chat_id, msg_id, '🎛 الفلاتر:', get_filters_keyboard())
-
-    elif d == 'set_filter_noma':
-        bot_state['filter_mode'] = 'NO_MA'
-        await edit_tg_msg(chat_id, msg_id, '🎛 الفلاتر:', get_filters_keyboard())
-
-    # ── Stochastic level toggles (ALL THREE fixed) ────────────────
-    elif d == 'toggle_stoch_deep':
-        bot_state['use_stoch_deep'] = not bot_state['use_stoch_deep']
-        await edit_tg_msg(chat_id, msg_id, '🎛 الفلاتر:', get_filters_keyboard())
-
-    elif d == 'toggle_stoch_mid':
-        bot_state['use_stoch_mid'] = not bot_state['use_stoch_mid']
-        await edit_tg_msg(chat_id, msg_id, '🎛 الفلاتر:', get_filters_keyboard())
-
-    elif d == 'toggle_stoch_shal':                             # ← bug fix
-        bot_state['use_stoch_shal'] = not bot_state['use_stoch_shal']
-        await edit_tg_msg(chat_id, msg_id, '🎛 الفلاتر:', get_filters_keyboard())
-
-    elif d == 'toggle_f_cons':
-        bot_state['use_f_cons'] = not bot_state['use_f_cons']
-        await edit_tg_msg(chat_id, msg_id, '🎛 الفلاتر:', get_filters_keyboard())
-
-    # ── Stochastic K parameter ────────────────────────────────────
-    elif d == 'inc_stoch_k':
-        bot_state['stoch_k'] = min(bot_state['stoch_k'] + 1, 100)
-        await edit_tg_msg(chat_id, msg_id, '⚙️ إعدادات الستوكاستيك:', get_stoch_settings_keyboard())
-
-    elif d == 'dec_stoch_k':
-        bot_state['stoch_k'] = max(bot_state['stoch_k'] - 1, 1)
-        await edit_tg_msg(chat_id, msg_id, '⚙️ إعدادات الستوكاستيك:', get_stoch_settings_keyboard())
-
-    # ── Stochastic Smooth parameter ───────────────────────────────
-    elif d == 'inc_stoch_s':
-        bot_state['stoch_smooth'] = min(bot_state['stoch_smooth'] + 1, 100)
-        await edit_tg_msg(chat_id, msg_id, '⚙️ إعدادات الستوكاستيك:', get_stoch_settings_keyboard())
-
-    elif d == 'dec_stoch_s':
-        bot_state['stoch_smooth'] = max(bot_state['stoch_smooth'] - 1, 1)
-        await edit_tg_msg(chat_id, msg_id, '⚙️ إعدادات الستوكاستيك:', get_stoch_settings_keyboard())
-
-    # ── Stochastic D parameter ────────────────────────────────────
-    elif d == 'inc_stoch_d':
-        bot_state['stoch_d'] = min(bot_state['stoch_d'] + 1, 100)
-        await edit_tg_msg(chat_id, msg_id, '⚙️ إعدادات الستوكاستيك:', get_stoch_settings_keyboard())
-
-    elif d == 'dec_stoch_d':
-        bot_state['stoch_d'] = max(bot_state['stoch_d'] - 1, 1)
-        await edit_tg_msg(chat_id, msg_id, '⚙️ إعدادات الستوكاستيك:', get_stoch_settings_keyboard())
-
-    # ── Stochastic presets ────────────────────────────────────────
-    elif d == 'preset_5_5_5':
-        bot_state['stoch_k'] = bot_state['stoch_smooth'] = bot_state['stoch_d'] = 5
-        await edit_tg_msg(chat_id, msg_id, '⚙️ إعدادات الستوكاستيك:', get_stoch_settings_keyboard())
-
-    elif d == 'preset_14_3_3':
-        bot_state['stoch_k'] = 14; bot_state['stoch_smooth'] = 3; bot_state['stoch_d'] = 3
-        await edit_tg_msg(chat_id, msg_id, '⚙️ إعدادات الستوكاستيك:', get_stoch_settings_keyboard())
-
-    elif d == 'preset_10_3_3':
-        bot_state['stoch_k'] = 10; bot_state['stoch_smooth'] = 3; bot_state['stoch_d'] = 3
-        await edit_tg_msg(chat_id, msg_id, '⚙️ إعدادات الستوكاستيك:', get_stoch_settings_keyboard())
-
-    # ── Time filters ──────────────────────────────────────────────
-    elif d == 'toggle_time':
-        bot_state['use_time_filter'] = not bot_state['use_time_filter']
-        await edit_tg_msg(chat_id, msg_id, '🎛 الفلاتر:', get_filters_keyboard())
-
-    elif d == 'toggle_danger':
-        bot_state['use_danger_filter'] = not bot_state['use_danger_filter']
-        await edit_tg_msg(chat_id, msg_id, '🎛 الفلاتر:', get_filters_keyboard())
-
-    # ── Timeframe toggles ─────────────────────────────────────────
-    elif d.startswith('toggle_tf_'):
-        tf = d.split('_')[2]
-        if tf in bot_state['active_tfs']:
-            bot_state['active_tfs'][tf] = not bot_state['active_tfs'][tf]
-        await edit_tg_msg(chat_id, msg_id, '⏱ إدارة الفريمات:', get_tf_keyboard())
-
-    # ── Risk settings ─────────────────────────────────────────────
-    elif d == 'toggle_be':
-        bot_state['use_be'] = not bot_state['use_be']
-        await edit_tg_msg(chat_id, msg_id, '🛠 إعدادات المخاطرة:', get_settings_keyboard())
-
-    elif d == 'toggle_atr':
-        bot_state['use_atr'] = not bot_state['use_atr']
-        await edit_tg_msg(chat_id, msg_id, '🛠 إعدادات المخاطرة:', get_settings_keyboard())
-
-    elif d == 'toggle_spread':
-        bot_state['use_max_spread'] = not bot_state['use_max_spread']
-        await edit_tg_msg(chat_id, msg_id, '🛠 إعدادات المخاطرة:', get_settings_keyboard())
-
-    elif d == 'inc_lot':
-        bot_state['lot_size'] = round(bot_state['lot_size'] + 0.01, 2)
-        await edit_tg_msg(chat_id, msg_id, '🛠 إعدادات المخاطرة:', get_settings_keyboard())
-
-    elif d == 'dec_lot':
-        bot_state['lot_size'] = max(0.01, round(bot_state['lot_size'] - 0.01, 2))
-        await edit_tg_msg(chat_id, msg_id, '🛠 إعدادات المخاطرة:', get_settings_keyboard())
-
-    elif d == 'view_tpsl':
-        await edit_tg_msg(chat_id, msg_id, '🎯 <b>تعديل TP / SL لكل فريم:</b>', get_tpsl_overview_keyboard())
-
-    # ── TP/SL per-TF editor ───────────────────────────────────────
-    elif d.startswith('tpsl_edit_'):
-        tf = d[len('tpsl_edit_'):]
-        if tf in _TFS:
-            await edit_tg_msg(chat_id, msg_id, f'✏️ <b>تعديل [{tf}]:</b>', get_tpsl_edit_keyboard(tf))
-
-    # ── TP adjustments (±5 and ±10) ──────────────────────────────
-    elif d.startswith('inc_tp5_') or d.startswith('inc_tp10_') \
-      or d.startswith('dec_tp5_') or d.startswith('dec_tp10_'):
-        # parse: action_typeSTEP_tf  e.g. inc_tp5_2m  dec_tp10_15m
-        parts = d.split('_')          # ['inc','tp5','2m'] or ['dec','tp10','15m']
-        direction = parts[0]          # 'inc' | 'dec'
-        step_str  = parts[1]          # 'tp5' | 'tp10'
-        tf        = '_'.join(parts[2:])   # handles '15m' correctly
-        step = 5 if step_str == 'tp5' else 10
-        if tf in _TFS:
-            current = bot_state['tp_pips'][tf]
-            new_val = current + step if direction == 'inc' else max(5, current - step)
-            bot_state['tp_pips'][tf] = new_val
-            await edit_tg_msg(chat_id, msg_id, f'✏️ <b>تعديل [{tf}]:</b>', get_tpsl_edit_keyboard(tf))
-
-    # ── SL adjustments (±5 and ±10) ──────────────────────────────
-    elif d.startswith('inc_sl5_') or d.startswith('inc_sl10_') \
-      or d.startswith('dec_sl5_') or d.startswith('dec_sl10_'):
-        parts     = d.split('_')
-        direction = parts[0]
-        step_str  = parts[1]          # 'sl5' | 'sl10'
-        tf        = '_'.join(parts[2:])
-        step = 5 if step_str == 'sl5' else 10
-        if tf in _TFS:
-            current = bot_state['sl_pips'][tf]
-            new_val = current + step if direction == 'inc' else max(5, current - step)
-            bot_state['sl_pips'][tf] = new_val
-            await edit_tg_msg(chat_id, msg_id, f'✏️ <b>تعديل [{tf}]:</b>', get_tpsl_edit_keyboard(tf))
-
-    # ── Reports ───────────────────────────────────────────────────
-    elif d == 'report':
-        lines = [f'📊 <b>حالة السوق الحية — {_strat_label()}</b>']
-        for tf in bot_state['timeframes']:
-            if bot_state['active_tfs'][tf]:
-                lines.append(f'[{tf}] {bot_state["market_data"][tf]}')
-        await edit_tg_msg(chat_id, msg_id, '\n'.join(lines), get_main_keyboard())
-
-    elif d == 'account':
-        if not (bot_state['live_connected'] and bot_state['connection_obj']):
-            await edit_tg_msg(chat_id, msg_id, '⚠️ غير متصل بالسيرفر.', get_main_keyboard())
-        else:
-            try:
-                info = await bot_state['connection_obj'].get_account_information()
-                pos  = await bot_state['connection_obj'].get_positions()
-                text = (
-                    f'💳 <b>معلومات الحساب</b>\n'
-                    f'الرصيد:           ${info.get("balance",    "N/A")}\n'
-                    f'الإكويتي:         ${info.get("equity",     "N/A")}\n'
-                    f'الهامش الحر:      ${info.get("freeMargin", "N/A")}\n'
-                    f'الصفقات المفتوحة: {len(pos)}'
-                )
-                await edit_tg_msg(chat_id, msg_id, text, get_main_keyboard())
-            except Exception as e:
-                await edit_tg_msg(chat_id, msg_id, f'❌ خطأ في جلب البيانات:\n{e}', get_main_keyboard())
-
-    # ── Backtest triggers ─────────────────────────────────────────
-        elif d.startswith('bto_adv_'):
-        days = int(d.split('_')[2])
-        asyncio.create_task(run_advanced_backtest(days=days))
-
-        elif d.startswith('bto_'):
-        days  = int(d.split('_')[1])
-        start = datetime.now(timezone.utc) - timedelta(days=days)
-        asyncio.create_task(run_oanda_backtest(start))
-
-        elif d == 'close_all':
-        if not (bot_state['live_connected'] and bot_state['connection_obj']):
-            await send_tg_msg('⚠️ غير متصل بالسيرفر.')
-        else:
-            try:
-                positions = await bot_state['connection_obj'].get_positions()
-                if not positions:
-                    await send_tg_msg('ℹ️ لا توجد صفقات مفتوحة حالياً.')
-                else:
-                    for p in positions:
-                        await bot_state['connection_obj'].close_position(p['id'])
-                    await send_tg_msg(f'✅ تم إغلاق {len(positions)} صفقة.')
+        # ── Live connection ───────────────────────────────────────────
+        elif d == 'toggle_live_conn':
+            if not bot_state['live_connected']:
+                await edit_tg_msg(chat_id, msg_id, '⏳ جاري الاتصال بالسيرفر...', get_main_keyboard())
+                try:
+                    api = MetaApi(METAAPI_TOKEN)
+                    bot_state['account_obj']    = await api.metatrader_account_api.get_account(ACCOUNT_ID)
+                    bot_state['connection_obj'] = bot_state['account_obj'].get_rpc_connection()
+                    await bot_state['connection_obj'].connect()
+                    await bot_state['connection_obj'].wait_synchronized()
+                    bot_state['live_connected'] = True
+                    await edit_tg_msg(chat_id, msg_id, '✅ تم الاتصال بالسيرفر بنجاح!', get_main_keyboard())
                 except Exception as e:
-                    await send_tg_msg(f'❌ خطأ في الإغلاق: {e}')
+                    await edit_tg_msg(chat_id, msg_id, f'❌ فشل الاتصال:\n{e}', get_main_keyboard())
+            else:
+                bot_state['live_connected'] = False
+                bot_state['connection_obj'] = None
+                bot_state['account_obj']    = None
+                await edit_tg_msg(chat_id, msg_id, '🔌 تم قطع الاتصال عن السيرفر.', get_main_keyboard())
 
-        else:
-            c_log(f'CB unhandled: {d!r}')
+        # ── MA Filters ────────────────────────────────────────────────
+        elif d == 'set_filter_full':
+            bot_state['filter_mode'] = 'FULL'
+            await edit_tg_msg(chat_id, msg_id, '🎛 الفلاتر:', get_filters_keyboard())
+
+        elif d == 'set_filter_simple':
+            bot_state['filter_mode'] = 'SIMPLE'
+            await edit_tg_msg(chat_id, msg_id, '🎛 الفلاتر:', get_filters_keyboard())
+
+        elif d == 'set_filter_noma':
+            bot_state['filter_mode'] = 'NO_MA'
+            await edit_tg_msg(chat_id, msg_id, '🎛 الفلاتر:', get_filters_keyboard())
+
+        # ── Stochastic level toggles (ALL THREE fixed) ────────────────
+        elif d == 'toggle_stoch_deep':
+            bot_state['use_stoch_deep'] = not bot_state['use_stoch_deep']
+            await edit_tg_msg(chat_id, msg_id, '🎛 الفلاتر:', get_filters_keyboard())
+
+        elif d == 'toggle_stoch_mid':
+            bot_state['use_stoch_mid'] = not bot_state['use_stoch_mid']
+            await edit_tg_msg(chat_id, msg_id, '🎛 الفلاتر:', get_filters_keyboard())
+
+        elif d == 'toggle_stoch_shal':                             # ← bug fix
+            bot_state['use_stoch_shal'] = not bot_state['use_stoch_shal']
+            await edit_tg_msg(chat_id, msg_id, '🎛 الفلاتر:', get_filters_keyboard())
+
+        elif d == 'toggle_f_cons':
+            bot_state['use_f_cons'] = not bot_state['use_f_cons']
+            await edit_tg_msg(chat_id, msg_id, '🎛 الفلاتر:', get_filters_keyboard())
+
+        # ── Stochastic K parameter ────────────────────────────────────
+        elif d == 'inc_stoch_k':
+            bot_state['stoch_k'] = min(bot_state['stoch_k'] + 1, 100)
+            await edit_tg_msg(chat_id, msg_id, '⚙️ إعدادات الستوكاستيك:', get_stoch_settings_keyboard())
+
+        elif d == 'dec_stoch_k':
+            bot_state['stoch_k'] = max(bot_state['stoch_k'] - 1, 1)
+            await edit_tg_msg(chat_id, msg_id, '⚙️ إعدادات الستوكاستيك:', get_stoch_settings_keyboard())
+
+        # ── Stochastic Smooth parameter ───────────────────────────────
+        elif d == 'inc_stoch_s':
+            bot_state['stoch_smooth'] = min(bot_state['stoch_smooth'] + 1, 100)
+            await edit_tg_msg(chat_id, msg_id, '⚙️ إعدادات الستوكاستيك:', get_stoch_settings_keyboard())
+
+        elif d == 'dec_stoch_s':
+            bot_state['stoch_smooth'] = max(bot_state['stoch_smooth'] - 1, 1)
+            await edit_tg_msg(chat_id, msg_id, '⚙️ إعدادات الستوكاستيك:', get_stoch_settings_keyboard())
+
+        # ── Stochastic D parameter ────────────────────────────────────
+        elif d == 'inc_stoch_d':
+            bot_state['stoch_d'] = min(bot_state['stoch_d'] + 1, 100)
+            await edit_tg_msg(chat_id, msg_id, '⚙️ إعدادات الستوكاستيك:', get_stoch_settings_keyboard())
+
+        elif d == 'dec_stoch_d':
+            bot_state['stoch_d'] = max(bot_state['stoch_d'] - 1, 1)
+            await edit_tg_msg(chat_id, msg_id, '⚙️ إعدادات الستوكاستيك:', get_stoch_settings_keyboard())
+
+        # ── Stochastic presets ────────────────────────────────────────
+        elif d == 'preset_5_5_5':
+            bot_state['stoch_k'] = bot_state['stoch_smooth'] = bot_state['stoch_d'] = 5
+            await edit_tg_msg(chat_id, msg_id, '⚙️ إعدادات الستوكاستيك:', get_stoch_settings_keyboard())
+
+        elif d == 'preset_14_3_3':
+            bot_state['stoch_k'] = 14; bot_state['stoch_smooth'] = 3; bot_state['stoch_d'] = 3
+            await edit_tg_msg(chat_id, msg_id, '⚙️ إعدادات الستوكاستيك:', get_stoch_settings_keyboard())
+
+        elif d == 'preset_10_3_3':
+            bot_state['stoch_k'] = 10; bot_state['stoch_smooth'] = 3; bot_state['stoch_d'] = 3
+            await edit_tg_msg(chat_id, msg_id, '⚙️ إعدادات الستوكاستيك:', get_stoch_settings_keyboard())
+
+        # ── Time filters ──────────────────────────────────────────────
+        elif d == 'toggle_time':
+            bot_state['use_time_filter'] = not bot_state['use_time_filter']
+            await edit_tg_msg(chat_id, msg_id, '🎛 الفلاتر:', get_filters_keyboard())
+
+        elif d == 'toggle_danger':
+            bot_state['use_danger_filter'] = not bot_state['use_danger_filter']
+            await edit_tg_msg(chat_id, msg_id, '🎛 الفلاتر:', get_filters_keyboard())
+
+        # ── Timeframe toggles ─────────────────────────────────────────
+        elif d.startswith('toggle_tf_'):
+            tf = d.split('_')[2]
+            if tf in bot_state['active_tfs']:
+                bot_state['active_tfs'][tf] = not bot_state['active_tfs'][tf]
+            await edit_tg_msg(chat_id, msg_id, '⏱ إدارة الفريمات:', get_tf_keyboard())
+
+        # ── Risk settings ─────────────────────────────────────────────
+        elif d == 'toggle_be':
+            bot_state['use_be'] = not bot_state['use_be']
+            await edit_tg_msg(chat_id, msg_id, '🛠 إعدادات المخاطرة:', get_settings_keyboard())
+
+        elif d == 'toggle_atr':
+            bot_state['use_atr'] = not bot_state['use_atr']
+            await edit_tg_msg(chat_id, msg_id, '🛠 إعدادات المخاطرة:', get_settings_keyboard())
+
+        elif d == 'toggle_spread':
+            bot_state['use_max_spread'] = not bot_state['use_max_spread']
+            await edit_tg_msg(chat_id, msg_id, '🛠 إعدادات المخاطرة:', get_settings_keyboard())
+
+        elif d == 'inc_lot':
+            bot_state['lot_size'] = round(bot_state['lot_size'] + 0.01, 2)
+            await edit_tg_msg(chat_id, msg_id, '🛠 إعدادات المخاطرة:', get_settings_keyboard())
+
+        elif d == 'dec_lot':
+            bot_state['lot_size'] = max(0.01, round(bot_state['lot_size'] - 0.01, 2))
+            await edit_tg_msg(chat_id, msg_id, '🛠 إعدادات المخاطرة:', get_settings_keyboard())
+
+        elif d == 'view_tpsl':
+            await edit_tg_msg(chat_id, msg_id, '🎯 <b>تعديل TP / SL لكل فريم:</b>', get_tpsl_overview_keyboard())
+
+        # ── TP/SL per-TF editor ───────────────────────────────────────
+        elif d.startswith('tpsl_edit_'):
+            tf = d[len('tpsl_edit_'):]
+            if tf in _TFS:
+                await edit_tg_msg(chat_id, msg_id, f'✏️ <b>تعديل [{tf}]:</b>', get_tpsl_edit_keyboard(tf))
+
+        # ── TP adjustments (±5 and ±10) ──────────────────────────────
+        elif d.startswith('inc_tp5_') or d.startswith('inc_tp10_') \
+          or d.startswith('dec_tp5_') or d.startswith('dec_tp10_'):
+            # parse: action_typeSTEP_tf  e.g. inc_tp5_2m  dec_tp10_15m
+            parts = d.split('_')          # ['inc','tp5','2m'] or ['dec','tp10','15m']
+            direction = parts[0]          # 'inc' | 'dec'
+            step_str  = parts[1]          # 'tp5' | 'tp10'
+            tf        = '_'.join(parts[2:])   # handles '15m' correctly
+            step = 5 if step_str == 'tp5' else 10
+            if tf in _TFS:
+                current = bot_state['tp_pips'][tf]
+                new_val = current + step if direction == 'inc' else max(5, current - step)
+                bot_state['tp_pips'][tf] = new_val
+                await edit_tg_msg(chat_id, msg_id, f'✏️ <b>تعديل [{tf}]:</b>', get_tpsl_edit_keyboard(tf))
+
+        # ── SL adjustments (±5 and ±10) ──────────────────────────────
+        elif d.startswith('inc_sl5_') or d.startswith('inc_sl10_') \
+          or d.startswith('dec_sl5_') or d.startswith('dec_sl10_'):
+            parts     = d.split('_')
+            direction = parts[0]
+            step_str  = parts[1]          # 'sl5' | 'sl10'
+            tf        = '_'.join(parts[2:])
+            step = 5 if step_str == 'sl5' else 10
+            if tf in _TFS:
+                current = bot_state['sl_pips'][tf]
+                new_val = current + step if direction == 'inc' else max(5, current - step)
+                bot_state['sl_pips'][tf] = new_val
+                await edit_tg_msg(chat_id, msg_id, f'✏️ <b>تعديل [{tf}]:</b>', get_tpsl_edit_keyboard(tf))
+
+        # ── Reports ───────────────────────────────────────────────────
+        elif d == 'report':
+            lines = [f'📊 <b>حالة السوق الحية — {_strat_label()}</b>']
+            for tf in bot_state['timeframes']:
+                if bot_state['active_tfs'][tf]:
+                    lines.append(f'[{tf}] {bot_state["market_data"][tf]}')
+            await edit_tg_msg(chat_id, msg_id, '\n'.join(lines), get_main_keyboard())
+
+        elif d == 'account':
+            if not (bot_state['live_connected'] and bot_state['connection_obj']):
+                await edit_tg_msg(chat_id, msg_id, '⚠️ غير متصل بالسيرفر.', get_main_keyboard())
+            else:
+                try:
+                    info = await bot_state['connection_obj'].get_account_information()
+                    pos  = await bot_state['connection_obj'].get_positions()
+                    text = (
+                        f'💳 <b>معلومات الحساب</b>\n'
+                        f'الرصيد:           ${info.get("balance",    "N/A")}\n'
+                        f'الإكويتي:         ${info.get("equity",     "N/A")}\n'
+                        f'الهامش الحر:      ${info.get("freeMargin", "N/A")}\n'
+                        f'الصفقات المفتوحة: {len(pos)}'
+                    )
+                    await edit_tg_msg(chat_id, msg_id, text, get_main_keyboard())
+                except Exception as e:
+                    await edit_tg_msg(chat_id, msg_id, f'❌ خطأ في جلب البيانات:\n{e}', get_main_keyboard())
+
+        # ── Backtest triggers ─────────────────────────────────────────
+            elif d.startswith('bto_adv_'):
+            days = int(d.split('_')[2])
+            asyncio.create_task(run_advanced_backtest(days=days))
+
+            elif d.startswith('bto_'):
+            days  = int(d.split('_')[1])
+            start = datetime.now(timezone.utc) - timedelta(days=days)
+            asyncio.create_task(run_oanda_backtest(start))
+
+            elif d == 'close_all':
+            if not (bot_state['live_connected'] and bot_state['connection_obj']):
+                await send_tg_msg('⚠️ غير متصل بالسيرفر.')
+            else:
+                try:
+                    positions = await bot_state['connection_obj'].get_positions()
+                    if not positions:
+                        await send_tg_msg('ℹ️ لا توجد صفقات مفتوحة حالياً.')
+                    else:
+                        for p in positions:
+                            await bot_state['connection_obj'].close_position(p['id'])
+                        await send_tg_msg(f'✅ تم إغلاق {len(positions)} صفقة.')
+                    except Exception as e:
+                        await send_tg_msg(f'❌ خطأ في الإغلاق: {e}')
+
+            else:
+                c_log(f'CB unhandled: {d!r}')
 
     except Exception as e:
         c_log(f'CB handler error [{d!r}]: {e}')
