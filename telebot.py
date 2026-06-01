@@ -1,5 +1,5 @@
 """
-Gold Scalper Bot — v5.2 (Live Tracking & Progress Bar)
+Gold Scalper Bot — v5.3 (Optimized & Blocked Logs Removed)
 Strategies : STOCH-NEW  |  STOCH-OLD  |  RSI-REVERSAL
 """
 
@@ -215,7 +215,9 @@ def _get_signal_for_bar(df: pd.DataFrame, i: int, curr: pd.Series, prev: pd.Seri
     buy_sig  = raw_buy  and trend_buy
     sell_sig = raw_sell and trend_sell
     label    = b_lbl if buy_sig else s_lbl
-    return buy_sig, sell_sig, label, raw_buy, raw_sell, b_lbl, s_lbl
+    
+    # تمت إزالة إرجاع تفاصيل الصفقات المرفوضة لتخفيف العبء
+    return buy_sig, sell_sig, label
 
 # ─────────────────────────────────────────────────────────────
 # OANDA REST HELPER
@@ -294,7 +296,6 @@ async def answer_callback(cbq_id: str, text: str = None, show_alert: bool = Fals
         pass
 
 async def send_tg_document(file_path: str, caption: str) -> bool:
-    """Returns True if document sent successfully, False otherwise."""
     if not bot_state['chat_id']: return False
     try:
         with open(file_path, 'rb') as f:
@@ -303,11 +304,9 @@ async def send_tg_document(file_path: str, caption: str) -> bool:
             data.add_field('document', f, filename=os.path.basename(file_path))
             data.add_field('caption', caption, parse_mode='HTML')
             
-            # زيادة وقت الانتظار تحسباً للملفات الكبيرة
             timeout = aiohttp.ClientTimeout(total=60)
             async with get_http().post(f'https://api.telegram.org/bot{TG_TOKEN}/sendDocument', data=data, timeout=timeout) as resp:
-                if resp.status == 200:
-                    return True
+                if resp.status == 200: return True
                 else:
                     c_log(f'TG doc upload failed: {resp.status} - {await resp.text()}')
                     return False
@@ -514,7 +513,7 @@ def _entry_params(curr: pd.Series, is_buy: bool, tf: str) -> tuple:
     return act_ent, tp_p, sl_p, eff_tp
 
 # ─────────────────────────────────────────────────────────────
-# STANDARD BACKTEST (WITH LIVE PROGRESS BAR)
+# STANDARD BACKTEST
 # ─────────────────────────────────────────────────────────────
 async def run_oanda_backtest(start_dt: datetime) -> None:
     desc  = f"{bot_state['strategy_mode']} / {bot_state['filter_mode']}"
@@ -526,7 +525,7 @@ async def run_oanda_backtest(start_dt: datetime) -> None:
     async def update_status(extra: str):
         if msg_id: await edit_tg_msg(bot_state['chat_id'], msg_id, f'{status_text}\n\n{extra}')
 
-    trade_logs, blocked_logs = [], []
+    trade_logs = []  # تمت إزالة blocked_logs تماماً لتخفيف العبء
     total_prof = peak_equity = max_dd = total_win = total_loss = 0.0
     win_count = loss_count = be_count = 0
 
@@ -566,12 +565,11 @@ async def run_oanda_backtest(start_dt: datetime) -> None:
 
             minute_candles = sorted(m1_raw, key=lambda x: x['time'])
 
-            # ── PROGRESS BAR LOGIC ──
             valid_indices = df[df['time'] >= start_dt].index
             total_candles = len(valid_indices)
             if total_candles == 0: continue
             
-            step = max(1, total_candles // 10) # Update every 10%
+            step = max(1, total_candles // 10)
 
             for idx, i in enumerate(valid_indices):
                 if i < safe_start: continue
@@ -586,14 +584,7 @@ async def run_oanda_backtest(start_dt: datetime) -> None:
                 if bot_state['use_time_filter'] and not (8 <= curr['time'].hour <= 17): continue
                 if bot_state['use_danger_filter'] and is_danger_time(curr['time']): continue
 
-                buy_sig, sell_sig, label, raw_buy, raw_sell, b_lbl, s_lbl = _get_signal_for_bar(df, i, curr, prev, prev2)
-                
-                ts = (curr['time'] + timedelta(hours=3)).strftime('%Y-%m-%d %H:%M')
-                if not buy_sig and raw_buy:
-                    blocked_logs.append({'Timeframe': tf, 'Type': f'BUY BLOCKED ({b_lbl})', 'Entry Time': ts, 'Entry Price': curr['close'], 'Reason': f'REJECTED ({bot_state["filter_mode"]})'})
-                if not sell_sig and raw_sell:
-                    blocked_logs.append({'Timeframe': tf, 'Type': f'SELL BLOCKED ({s_lbl})', 'Entry Time': ts, 'Entry Price': curr['close'], 'Reason': f'REJECTED ({bot_state["filter_mode"]})'})
-
+                buy_sig, sell_sig, label = _get_signal_for_bar(df, i, curr, prev, prev2)
                 if not (buy_sig or sell_sig) or i + 1 >= len(df): continue
 
                 next_c = df.loc[i + 1]
@@ -618,7 +609,7 @@ async def run_oanda_backtest(start_dt: datetime) -> None:
             await update_status('⚠️ لم يتم العثور على أي صفقات خلال هذه الفترة.')
             return
 
-        await update_status('✅ <b>اكتمل الفحص!</b>\nجاري الآن بناء وتجهيز ملف الإكسل (Excel)...')
+        await update_status('✅ <b>اكتمل الفحص!</b>\nجاري الآن بناء وتجهيز ملف الإكسل (بدون الصفقات المرفوضة)...')
         
         total_trades = win_count + loss_count
         win_rate     = round(win_count / total_trades * 100, 1) if total_trades else 0
@@ -631,23 +622,21 @@ async def run_oanda_backtest(start_dt: datetime) -> None:
             with pd.ExcelWriter(fname, engine='openpyxl') as writer:
                 pd.DataFrame(trade_logs).to_excel(writer, sheet_name='الصفقات', index=False)
                 pd.DataFrame(summary).to_excel(writer, sheet_name='الملخص', index=False)
-                if blocked_logs:
-                    pd.DataFrame(blocked_logs).to_excel(writer, sheet_name='المرفوضة', index=False)
                 _style_sheet(writer.sheets['الصفقات'])
         except Exception as excel_err:
-            await update_status(f'❌ <b>فشل في بناء ملف الإكسل!</b>\nالخطأ: {excel_err}\n(تأكد من وجود مكتبة openpyxl في السيرفر)')
+            await update_status(f'❌ <b>فشل في بناء ملف الإكسل!</b>\nالخطأ: {excel_err}')
             return
 
-        await update_status('📤 <b>جاري رفع التقرير إلى تيليجرام...</b>\n(قد يستغرق بضع ثوانٍ بسبب حجم الملف)')
+        await update_status('📤 <b>جاري رفع التقرير إلى تيليجرام...</b>\n(الملف الآن خفيف وسريع الإرسال)')
         
         success = await send_tg_document(fname, f'📊 <b>الباك تيست</b> | {desc}\n✅ +${round(total_win, 2)} | ❌ -${abs(round(total_loss, 2))}\n💰 ${round(total_prof, 2)} | 🎯 {win_rate}%')
         
         if success:
             await update_status('🎉 <b>تم الانتهاء بنجاح!</b> (تم إرسال الملف)')
         else:
-            await update_status('❌ <b>اكتمل الفحص، لكن فشل إرسال الملف!</b>\n(حجم الملف كبير جداً أو هناك مشكلة في اتصال تيليجرام)')
+            await update_status('❌ <b>اكتمل الفحص، لكن فشل إرسال الملف لتيليجرام!</b>')
             
-        os.remove(fname)
+        if os.path.exists(fname): os.remove(fname)
 
     except Exception as e:
         err_msg = traceback.format_exc()
@@ -657,7 +646,7 @@ async def run_oanda_backtest(start_dt: datetime) -> None:
         bot_state['is_backtesting'] = False
 
 # ─────────────────────────────────────────────────────────────
-# ADVANCED BACKTEST (WITH LIVE PROGRESS BAR)
+# ADVANCED BACKTEST
 # ─────────────────────────────────────────────────────────────
 async def run_advanced_backtest(days: int = 7) -> None:
     desc     = f"{bot_state['strategy_mode']} / {bot_state['filter_mode']}"
@@ -709,7 +698,6 @@ async def run_advanced_backtest(days: int = 7) -> None:
 
             minute_candles = sorted(m1_raw, key=lambda x: x['time'])
 
-            # ── PROGRESS BAR LOGIC ──
             valid_indices = df[df['time'] >= start_dt].index
             total_candles = len(valid_indices)
             if total_candles == 0: continue
@@ -729,7 +717,7 @@ async def run_advanced_backtest(days: int = 7) -> None:
                 if bot_state['use_time_filter'] and not (8 <= curr['time'].hour <= 17): continue
                 if bot_state['use_danger_filter'] and is_danger_time(curr['time']): continue
 
-                buy_sig, sell_sig, label, *_ = _get_signal_for_bar(df, i, curr, prev, prev2)
+                buy_sig, sell_sig, label = _get_signal_for_bar(df, i, curr, prev, prev2)
                 if not (buy_sig or sell_sig) or i + 1 >= len(df): continue
 
                 next_c = df.loc[i + 1]
@@ -754,7 +742,7 @@ async def run_advanced_backtest(days: int = 7) -> None:
             await update_status('⚠️ لم يتم العثور على صفقات خلال هذه الفترة.')
             return
 
-        await update_status('✅ <b>اكتمل الفحص!</b>\nجاري الآن بناء وتجهيز ملف الإكسل (Excel)...')
+        await update_status('✅ <b>اكتمل الفحص!</b>\nجاري الآن بناء وتجهيز ملف الإكسل...')
         total_trades = win_count + loss_count
         win_rate     = round(win_count / total_trades * 100, 1) if total_trades else 0
         pf           = round(total_win / abs(total_loss), 2) if total_loss else 999.0
@@ -775,19 +763,19 @@ async def run_advanced_backtest(days: int = 7) -> None:
                 df_exec.to_excel(writer, sheet_name='الصفقات', index=False)
                 _style_sheet(writer.sheets['الصفقات'])
         except Exception as excel_err:
-            await update_status(f'❌ <b>فشل في بناء ملف الإكسل!</b>\nالخطأ: {excel_err}\n(تأكد من وجود مكتبة openpyxl في السيرفر)')
+            await update_status(f'❌ <b>فشل في بناء ملف الإكسل!</b>\nالخطأ: {excel_err}')
             return
 
-        await update_status('📤 <b>جاري رفع التقرير إلى تيليجرام...</b>\n(قد يستغرق بضع ثوانٍ بسبب حجم الملف)')
+        await update_status('📤 <b>جاري رفع التقرير إلى تيليجرام...</b>')
         
         success = await send_tg_document(xlsx_adv, f'📊 Advanced Report | {desc}')
         
         if success:
             await update_status('🎉 <b>تم الانتهاء بنجاح!</b> (تم إرسال الملف)')
         else:
-            await update_status('❌ <b>اكتمل الفحص، لكن فشل إرسال الملف!</b>\n(حجم الملف كبير جداً أو هناك مشكلة في اتصال تيليجرام)')
+            await update_status('❌ <b>اكتمل الفحص، لكن فشل إرسال الملف!</b>')
             
-        os.remove(xlsx_adv)
+        if os.path.exists(xlsx_adv): os.remove(xlsx_adv)
 
     except Exception as e:
         err_msg = traceback.format_exc()
@@ -858,7 +846,7 @@ async def timeframe_scanner(tf: str) -> None:
 
             if bot_state['last_signal_time'][tf] == curr['time']: await asyncio.sleep(10); continue
 
-            buy_sig, sell_sig, label, *_ = _get_signal_for_bar(df, df.index[-2], curr, prev, prev2)
+            buy_sig, sell_sig, label = _get_signal_for_bar(df, df.index[-2], curr, prev, prev2)
 
             if bot_state['use_max_spread'] and (buy_sig or sell_sig):
                 try:
@@ -892,7 +880,7 @@ async def process_tg_update(update: dict) -> None:
         bot_state['chat_id'] = update['message']['chat']['id']
 
         if msg == '/start':
-            await send_tg_msg('🤖 <b>Gold Scalper Bot v5.2</b>\nالاستراتيجيات المتاحة: STOCH-NEW | STOCH-OLD | RSI-REVERSAL', get_main_keyboard())
+            await send_tg_msg('🤖 <b>Gold Scalper Bot v5.3</b>\nالاستراتيجيات المتاحة: STOCH-NEW | STOCH-OLD | RSI-REVERSAL', get_main_keyboard())
         elif msg.startswith('/backtest'):
             if bot_state['is_backtesting']:
                 await send_tg_msg('⚠️ <b>عذراً:</b> البوت يقوم بباك تيست حالياً. الرجاء الانتظار حتى ينتهي.')
@@ -1051,7 +1039,7 @@ async def supervised(coro_fn, *args):
 
 _start_time = datetime.now(timezone.utc)
 async def handle_ping(request: web.Request) -> web.Response:
-    return web.Response(text=f'Gold Scalper Bot v5.2 — OK\nUptime: {datetime.now(timezone.utc) - _start_time}', content_type='text/plain')
+    return web.Response(text=f'Gold Scalper Bot v5.3 — OK\nUptime: {datetime.now(timezone.utc) - _start_time}', content_type='text/plain')
 
 async def main() -> None:
     get_http()
