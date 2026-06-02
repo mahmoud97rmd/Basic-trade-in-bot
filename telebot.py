@@ -1,5 +1,5 @@
 """
-Gold Scalper Bot — v5.3 (Optimized & Blocked Logs Removed)
+Gold Scalper Bot — v5.4 (Ultimate Edition: Live Tracking + 3 Export Options)
 Strategies : STOCH-NEW  |  STOCH-OLD  |  RSI-REVERSAL
 """
 
@@ -8,6 +8,7 @@ import aiohttp
 import json
 import os
 import traceback
+import zipfile
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta, timezone
@@ -26,11 +27,25 @@ OANDA_URL     = 'https://api-fxpractice.oanda.com/v3'
 _TFS = ['1m', '2m', '3m', '5m', '15m']
 
 # ─────────────────────────────────────────────────────────────
-# PROGRESS BAR HELPER
+# PROGRESS BAR & CLOUD HELPERS
 # ─────────────────────────────────────────────────────────────
 def make_progress_bar(pct: int, length: int = 12) -> str:
     filled = int(length * (pct / 100))
     return '█' * filled + '░' * (length - filled)
+
+async def upload_to_fileio(filepath: str) -> str:
+    """يرفع الملف إلى سحابة مؤقتة ويعيد رابط التحميل المباشر"""
+    try:
+        with open(filepath, 'rb') as f:
+            data = aiohttp.FormData()
+            data.add_field('file', f, filename=os.path.basename(filepath))
+            async with get_http().post('https://file.io/?expires=1w', data=data) as resp:
+                if resp.status == 200:
+                    res = await resp.json()
+                    return res.get('link', '')
+    except Exception as e:
+        c_log(f'File.io Upload Error: {e}')
+    return ''
 
 # ─────────────────────────────────────────────────────────────
 # GLOBAL SHARED HTTP SESSION
@@ -215,8 +230,6 @@ def _get_signal_for_bar(df: pd.DataFrame, i: int, curr: pd.Series, prev: pd.Seri
     buy_sig  = raw_buy  and trend_buy
     sell_sig = raw_sell and trend_sell
     label    = b_lbl if buy_sig else s_lbl
-    
-    # تمت إزالة إرجاع تفاصيل الصفقات المرفوضة لتخفيف العبء
     return buy_sig, sell_sig, label
 
 # ─────────────────────────────────────────────────────────────
@@ -525,7 +538,7 @@ async def run_oanda_backtest(start_dt: datetime) -> None:
     async def update_status(extra: str):
         if msg_id: await edit_tg_msg(bot_state['chat_id'], msg_id, f'{status_text}\n\n{extra}')
 
-    trade_logs = []  # تمت إزالة blocked_logs تماماً لتخفيف العبء
+    trade_logs = []
     total_prof = peak_equity = max_dd = total_win = total_loss = 0.0
     win_count = loss_count = be_count = 0
 
@@ -536,8 +549,7 @@ async def run_oanda_backtest(start_dt: datetime) -> None:
             await update_status(f'🔄 <b>[{tf}]</b>: جاري جلب الشموع الأساسية للمحاكاة...')
             c_data = await fetch_oanda_candles('XAU_USD', tf, 5000)
             if len(c_data) < 300: 
-                await asyncio.sleep(2)
-                continue
+                await asyncio.sleep(2); continue
 
             df = calculate_indicators(pd.DataFrame(c_data).sort_values('time').reset_index(drop=True))
             safe_start = max(10, bot_state['cons_count'])
@@ -545,32 +557,26 @@ async def run_oanda_backtest(start_dt: datetime) -> None:
             tf_end    = datetime.now(timezone.utc)
             total_min = int((tf_end - start_dt).total_seconds() / 60) + 72 * 60
             
-            await update_status(f'📥 <b>[{tf}]</b>: جاري جلب شموع دقيقة (1m) لضمان الدقة...')
-            m1_raw = []
-            current_end = tf_end
-            fetched = 0
+            await update_status(f'📥 <b>[{tf}]</b>: جاري جلب شموع دقيقة (1m)...')
+            m1_raw, current_end, fetched = [], tf_end, 0
             while fetched < total_min:
                 chunk = min(total_min - fetched, 5000)
                 cndls = await fetch_oanda_candles('XAU_USD', '1m', chunk, current_end)
                 if not cndls: break
                 m1_raw = cndls + m1_raw
-                
                 new_end = cndls[0]['time']
                 if new_end >= current_end: break 
                 current_end = new_end
-                
                 fetched += len(cndls)
                 if len(cndls) < chunk: break
                 await asyncio.sleep(0.5)
 
             minute_candles = sorted(m1_raw, key=lambda x: x['time'])
-
             valid_indices = df[df['time'] >= start_dt].index
             total_candles = len(valid_indices)
             if total_candles == 0: continue
             
             step = max(1, total_candles // 10)
-
             for idx, i in enumerate(valid_indices):
                 if i < safe_start: continue
                 if idx % 50 == 0: await asyncio.sleep(0)
@@ -609,8 +615,7 @@ async def run_oanda_backtest(start_dt: datetime) -> None:
             await update_status('⚠️ لم يتم العثور على أي صفقات خلال هذه الفترة.')
             return
 
-        await update_status('✅ <b>اكتمل الفحص!</b>\nجاري الآن بناء وتجهيز ملف الإكسل (بدون الصفقات المرفوضة)...')
-        
+        await update_status('✅ <b>اكتمل الفحص!</b>\nجاري تجهيز الخيارات (1: CSV، 2: ZIP، 4: Cloud)...')
         total_trades = win_count + loss_count
         win_rate     = round(win_count / total_trades * 100, 1) if total_trades else 0
         summary = {
@@ -618,30 +623,50 @@ async def run_oanda_backtest(start_dt: datetime) -> None:
             'القيمة': [f'{win_count} | +${round(total_win, 2)}', f'{loss_count} | -${abs(round(total_loss, 2))}', f'${round(total_prof, 2)}', f'{win_rate}% ({total_trades} صفقة)', f'${round(max_dd, 2)}', str(be_count), desc],
         }
 
+        # ── إعداد الخيارات ──
+        df_exec = pd.DataFrame(trade_logs)
+        
+        # 1. الخيار الأول (CSV)
+        csv_fname = fname.replace('.xlsx', '.csv')
+        df_exec.to_csv(csv_fname, index=False)
+
+        # 2. الخيار الثاني (إكسل مضغوط ZIP)
+        zip_fname = fname.replace('.xlsx', '.zip')
         try:
             with pd.ExcelWriter(fname, engine='openpyxl') as writer:
-                pd.DataFrame(trade_logs).to_excel(writer, sheet_name='الصفقات', index=False)
+                df_exec.to_excel(writer, sheet_name='الصفقات', index=False)
                 pd.DataFrame(summary).to_excel(writer, sheet_name='الملخص', index=False)
                 _style_sheet(writer.sheets['الصفقات'])
+            
+            with zipfile.ZipFile(zip_fname, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                zipf.write(fname, os.path.basename(fname))
         except Exception as excel_err:
-            await update_status(f'❌ <b>فشل في بناء ملف الإكسل!</b>\nالخطأ: {excel_err}')
+            await update_status(f'❌ فشل في بناء وتجهيز الملفات: {excel_err}')
             return
 
-        await update_status('📤 <b>جاري رفع التقرير إلى تيليجرام...</b>\n(الملف الآن خفيف وسريع الإرسال)')
+        # 4. الخيار الرابع (سحابة File.io)
+        await update_status('☁️ <b>جاري الرفع إلى السحابة لتوفير رابط مباشر...</b>')
+        cloud_link = await upload_to_fileio(zip_fname)
+
+        await update_status('📤 <b>جاري إرسال الملفات إلى تيليجرام...</b>')
         
-        success = await send_tg_document(fname, f'📊 <b>الباك تيست</b> | {desc}\n✅ +${round(total_win, 2)} | ❌ -${abs(round(total_loss, 2))}\n💰 ${round(total_prof, 2)} | 🎯 {win_rate}%')
+        msg_text = f'📊 <b>الباك تيست</b> | {desc}\n✅ +${round(total_win, 2)} | ❌ -${abs(round(total_loss, 2))}\n💰 ${round(total_prof, 2)} | 🎯 {win_rate}%\n'
+        if cloud_link:
+            msg_text += f'\n🔗 <b>رابط التحميل السحابي (يحذف تلقائياً بعد التنزيل):</b>\n{cloud_link}'
+
+        # إرسال الملفات
+        await send_tg_document(csv_fname, f'📄 <b>[خيار 1] ملف CSV خفيف</b>\n{msg_text}')
+        await send_tg_document(zip_fname, f'🗜️ <b>[خيار 2] ملف Excel مضغوط</b>\n{msg_text}')
         
-        if success:
-            await update_status('🎉 <b>تم الانتهاء بنجاح!</b> (تم إرسال الملف)')
-        else:
-            await update_status('❌ <b>اكتمل الفحص، لكن فشل إرسال الملف لتيليجرام!</b>')
+        await update_status('🎉 <b>تم الانتهاء بنجاح! جرب الملفات وأخبرني أي خيار أثبت كفاءته أكثر.</b>')
             
-        if os.path.exists(fname): os.remove(fname)
+        for f in [fname, csv_fname, zip_fname]:
+            if os.path.exists(f): os.remove(f)
 
     except Exception as e:
         err_msg = traceback.format_exc()
         c_log(f'Backtest Error: {err_msg}')
-        await update_status(f'❌ <b>حدث خطأ غير متوقع أثناء الفحص:</b>\n<code>{e}</code>\nتم إلغاء العملية.')
+        await update_status(f'❌ <b>حدث خطأ غير متوقع:</b>\n<code>{e}</code>')
     finally:
         bot_state['is_backtesting'] = False
 
@@ -651,6 +676,7 @@ async def run_oanda_backtest(start_dt: datetime) -> None:
 async def run_advanced_backtest(days: int = 7) -> None:
     desc     = f"{bot_state['strategy_mode']} / {bot_state['filter_mode']}"
     start_dt = datetime.now(timezone.utc) - timedelta(days=days)
+    fname    = f"ADV_{datetime.now().strftime('%H%M%S')}.xlsx"
     
     status_text = f'⏳ <b>Advanced Backtest</b>\nمن: {start_dt.strftime("%Y-%m-%d")}\nالاستراتيجية: {desc}'
     msg_id = await send_tg_msg(status_text)
@@ -669,8 +695,7 @@ async def run_advanced_backtest(days: int = 7) -> None:
             await update_status(f'🔄 <b>[{tf}]</b>: جاري جلب الشموع الأساسية للمحاكاة...')
             c_data = await fetch_oanda_candles('XAU_USD', tf, 5000)
             if len(c_data) < 300: 
-                await asyncio.sleep(2)
-                continue
+                await asyncio.sleep(2); continue
 
             df = calculate_indicators(pd.DataFrame(c_data).sort_values('time').reset_index(drop=True))
             safe_start = max(10, bot_state['cons_count'])
@@ -678,32 +703,26 @@ async def run_advanced_backtest(days: int = 7) -> None:
             tf_end    = datetime.now(timezone.utc)
             total_min = int((tf_end - start_dt).total_seconds() / 60) + 72 * 60
             
-            await update_status(f'📥 <b>[{tf}]</b>: جاري جلب شموع دقيقة (1m) لضمان الدقة...')
-            m1_raw = []
-            current_end = tf_end
-            fetched = 0
+            await update_status(f'📥 <b>[{tf}]</b>: جاري جلب شموع دقيقة (1m)...')
+            m1_raw, current_end, fetched = [], tf_end, 0
             while fetched < total_min:
                 chunk = min(total_min - fetched, 5000)
                 cndls = await fetch_oanda_candles('XAU_USD', '1m', chunk, current_end)
                 if not cndls: break
                 m1_raw = cndls + m1_raw
-                
                 new_end = cndls[0]['time']
                 if new_end >= current_end: break 
                 current_end = new_end
-                
                 fetched += len(cndls)
                 if len(cndls) < chunk: break
                 await asyncio.sleep(0.5)
 
             minute_candles = sorted(m1_raw, key=lambda x: x['time'])
-
             valid_indices = df[df['time'] >= start_dt].index
             total_candles = len(valid_indices)
             if total_candles == 0: continue
             
             step = max(1, total_candles // 10)
-
             for idx, i in enumerate(valid_indices):
                 if i < safe_start: continue
                 if idx % 50 == 0: await asyncio.sleep(0)
@@ -742,45 +761,59 @@ async def run_advanced_backtest(days: int = 7) -> None:
             await update_status('⚠️ لم يتم العثور على صفقات خلال هذه الفترة.')
             return
 
-        await update_status('✅ <b>اكتمل الفحص!</b>\nجاري الآن بناء وتجهيز ملف الإكسل...')
+        await update_status('✅ <b>اكتمل الفحص!</b>\nجاري تجهيز الخيارات (1: CSV، 2: ZIP، 4: Cloud)...')
         total_trades = win_count + loss_count
         win_rate     = round(win_count / total_trades * 100, 1) if total_trades else 0
         pf           = round(total_win / abs(total_loss), 2) if total_loss else 999.0
 
-        report = (
+        # ── إعداد الخيارات ──
+        df_exec = pd.DataFrame(trade_logs)
+        
+        # 1. الخيار الأول (CSV)
+        csv_fname = fname.replace('.xlsx', '.csv')
+        df_exec.to_csv(csv_fname, index=False)
+
+        # 2. الخيار الثاني (إكسل مضغوط ZIP)
+        zip_fname = fname.replace('.xlsx', '.zip')
+        try:
+            with pd.ExcelWriter(fname, engine='openpyxl') as writer:
+                df_exec.to_excel(writer, sheet_name='الصفقات', index=False)
+                _style_sheet(writer.sheets['الصفقات'])
+            
+            with zipfile.ZipFile(zip_fname, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                zipf.write(fname, os.path.basename(fname))
+        except Exception as excel_err:
+            await update_status(f'❌ فشل في بناء الملفات: {excel_err}')
+            return
+
+        # 4. الخيار الرابع (الرفع السحابي)
+        await update_status('☁️ <b>جاري الرفع إلى السحابة لتوفير رابط مباشر...</b>')
+        cloud_link = await upload_to_fileio(zip_fname)
+
+        await update_status('📤 <b>جاري إرسال التقرير النهائي إلى تيليجرام...</b>')
+        
+        msg_text = (
             f'📊 <b>Advanced Report — {days} يوم</b>\n'
             f'صافي: ${round(total_prof, 2)} | ربح: +${round(total_win, 2)} | خسارة: -${abs(round(total_loss, 2))}\n'
             f'صفقات: {total_trades} | فوز: {win_rate}% | PF: {pf}\n'
             f'📉 Drawdown: ${round(max_dd, 2)}'
         )
-        await send_tg_msg(report)
+        if cloud_link:
+            msg_text += f'\n\n🔗 <b>رابط التحميل السحابي (يحذف تلقائياً):</b>\n{cloud_link}'
 
-        xlsx_adv = f"ADV_{datetime.now().strftime('%H%M%S')}.xlsx"
-        df_exec  = pd.DataFrame(trade_logs)
+        # إرسال الملفات
+        await send_tg_document(csv_fname, f'📄 <b>[خيار 1] ملف CSV خفيف</b>\n{msg_text}')
+        await send_tg_document(zip_fname, f'🗜️ <b>[خيار 2] ملف Excel مضغوط</b>\n{msg_text}')
         
-        try:
-            with pd.ExcelWriter(xlsx_adv, engine='openpyxl') as writer:
-                df_exec.to_excel(writer, sheet_name='الصفقات', index=False)
-                _style_sheet(writer.sheets['الصفقات'])
-        except Exception as excel_err:
-            await update_status(f'❌ <b>فشل في بناء ملف الإكسل!</b>\nالخطأ: {excel_err}')
-            return
-
-        await update_status('📤 <b>جاري رفع التقرير إلى تيليجرام...</b>')
-        
-        success = await send_tg_document(xlsx_adv, f'📊 Advanced Report | {desc}')
-        
-        if success:
-            await update_status('🎉 <b>تم الانتهاء بنجاح!</b> (تم إرسال الملف)')
-        else:
-            await update_status('❌ <b>اكتمل الفحص، لكن فشل إرسال الملف!</b>')
+        await update_status('🎉 <b>تم الانتهاء بنجاح! جرب الملفات لاختيار الأنسب.</b>')
             
-        if os.path.exists(xlsx_adv): os.remove(xlsx_adv)
+        for f in [fname, csv_fname, zip_fname]:
+            if os.path.exists(f): os.remove(f)
 
     except Exception as e:
         err_msg = traceback.format_exc()
         c_log(f'Advanced Backtest Error: {err_msg}')
-        await update_status(f'❌ <b>حدث خطأ غير متوقع أثناء الفحص:</b>\n<code>{e}</code>\nتم إلغاء العملية.')
+        await update_status(f'❌ <b>حدث خطأ غير متوقع:</b>\n<code>{e}</code>')
     finally:
         bot_state['is_backtesting'] = False
 
@@ -880,7 +913,7 @@ async def process_tg_update(update: dict) -> None:
         bot_state['chat_id'] = update['message']['chat']['id']
 
         if msg == '/start':
-            await send_tg_msg('🤖 <b>Gold Scalper Bot v5.3</b>\nالاستراتيجيات المتاحة: STOCH-NEW | STOCH-OLD | RSI-REVERSAL', get_main_keyboard())
+            await send_tg_msg('🤖 <b>Gold Scalper Bot v5.4</b>\nالاستراتيجيات المتاحة: STOCH-NEW | STOCH-OLD | RSI-REVERSAL', get_main_keyboard())
         elif msg.startswith('/backtest'):
             if bot_state['is_backtesting']:
                 await send_tg_msg('⚠️ <b>عذراً:</b> البوت يقوم بباك تيست حالياً. الرجاء الانتظار حتى ينتهي.')
@@ -1039,7 +1072,7 @@ async def supervised(coro_fn, *args):
 
 _start_time = datetime.now(timezone.utc)
 async def handle_ping(request: web.Request) -> web.Response:
-    return web.Response(text=f'Gold Scalper Bot v5.3 — OK\nUptime: {datetime.now(timezone.utc) - _start_time}', content_type='text/plain')
+    return web.Response(text=f'Gold Scalper Bot v5.4 — OK\nUptime: {datetime.now(timezone.utc) - _start_time}', content_type='text/plain')
 
 async def main() -> None:
     get_http()
