@@ -721,8 +721,8 @@ def _build_trade_row(tf, is_buy, label, entry_t, exit_t, act_ent, tp_p, sl_p, ou
     return {
         'Timeframe':   tf,
         'Type':        ('BUY' if is_buy else 'SELL') + f' [{label}]',
-        'Entry Time':  (entry_t + timedelta(hours=3)).strftime('%Y-%m-%d %H:%M'),
-        'Exit Time':   (exit_t  + timedelta(hours=3)).strftime('%Y-%m-%d %H:%M'),
+        'Entry Time':  entry_t.strftime('%Y-%m-%d %H:%M'),
+        'Exit Time':   exit_t.strftime('%Y-%m-%d %H:%M'),
         'Entry Price': round(act_ent, 2),
         'TP': tp_p, 'SL': sl_p,
         'Pips': (round(abs(act_ent - (tp_p if outcome == 'WIN' else sl_p)) / pv, 1)
@@ -842,7 +842,7 @@ async def run_deriv_backtest(start_dt: datetime) -> None:
                 if bot_state['use_danger_filter'] and is_blocked_time(curr['time']): continue
                 buy_sig, sell_sig, label = _get_signal_for_bar(df, i, curr, prev)
                 raw_buy, raw_sell, b_lbl, s_lbl = get_stoch_signals(prev['K'], prev['D'], curr['K'], curr['D'])
-                ts = (curr['time'] + timedelta(hours=3)).strftime('%Y-%m-%d %H:%M')
+                ts = curr['time'].strftime('%Y-%m-%d %H:%M')
                 if not buy_sig  and raw_buy:
                     blocked_logs.append({'Timeframe': tf, 'Type': f'BUY BLOCKED ({b_lbl})', 'Entry Time': ts, 'Entry Price': curr['close'], 'Reason': f'REJECTED ({bot_state["filter_mode"]})'})
                 if not sell_sig and raw_sell:
