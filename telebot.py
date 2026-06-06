@@ -1,10 +1,11 @@
 """
-Gold Scalper Bot — v4.4 (Smart Cache & Transparent Tracking Edition)
+Gold Scalper Bot — v4.5 (Deriv WebSocket Edition & Smart Cache)
 Strategies : STOCH-NEW  |  STOCH-OLD
 """
 
 import asyncio
 import aiohttp
+import websockets
 import json
 import os
 import pandas as pd
@@ -19,8 +20,11 @@ from aiohttp import web
 METAAPI_TOKEN = 'eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9..NRMo-BO9ezZBEb4XmCQzkMsRN1iAz1rVSk7XWFP-ZGS_AZEyxSfIjnJ5w-r4egazV7tnxNLjjMuAdUb25T3ur3XWKCL4Jo9LFPy9tZzhIMRtlhq8d6YAHK9uxJclqJv5BZQFDeMeiFtyalLNjaE100Lp2zEnGWwlloxF-dpCw5DXvVKeGfMyVx4L2kisshcysDo7OeMkDBU1UB7leHi2eviEl7XQCpmhxdzT4BwMkf8YERx2jouKVu8-koVy00aon0drktGBSlQDOFw2WV0hg-VUfeCBR_Hgw2czqKVJ_lj_ZN3EsjWirirpiuXWbtwdD-VPokjKtX1z3ugcSTS1nd2iFIzauUHdOfb7Jl0R6cm8FosVS-4Iu046DiMsrxiAJ4PBywOXQhsFzZiePqmil1w5HHCxrw_78HNR9XcjBETMpHx9W48llIeUOkBVbsKfBP5iYtGSjS52i0QgpvHkfKrtXfbkMT0_9yJFG2kfZJHwJ5BJzWT4aKXto3l6iGe45xe4ZJhYhZX_RkC6dxR2w84M-uY-wlqiv_sxjHNOguSyOx4lfaeoq5H-LuJiWpHAYxEJUQWoQAQ7PObZOXCDWLRc_vP2gcbv1qYxTjD54FHnqhyf-oTGzAkWG5CVQFKpp9jTHQ3pXEYTSgIUTfHDbtoesAY1HG3nHcHbwujnqo0'
 ACCOUNT_ID    = '7d54fa6f-eaf7-4637-92a1-e0356ee729f8'
 TG_TOKEN      = '8779425898:AAFQgqay6IO89I2Sf98PigL28v9AHCcZPMw'
-OANDA_API     = 'd05b25b3f1ce0c8fa105ffefa45efb01-a5c26f544a26a4f810f1809913a2795f'
-OANDA_URL     = 'https://api-fxpractice.oanda.com/v3'
+
+# إعدادات Deriv WebSocket
+DERIV_APP_ID  = '1089'
+DERIV_WS_URL  = f'wss://ws.binaryws.com/websockets/v3?app_id={DERIV_APP_ID}'
+DERIV_SYMBOL  = 'frxXAUUSD'
 
 # جميع الفريمات المتاحة
 _TFS = ['1m', '2m', '3m', '4m', '5m', '6m', '10m', '12m', '15m', '20m', '30m', '1h', '2h']
@@ -29,7 +33,7 @@ _TFS = ['1m', '2m', '3m', '4m', '5m', '6m', '10m', '12m', '15m', '20m', '30m', '
 DD_LIMIT_PCT = 0.03
 
 # ─────────────────────────────────────────────────────────────
-# GLOBAL SHARED HTTP SESSION
+# GLOBAL SHARED HTTP SESSION (For Telegram)
 # ─────────────────────────────────────────────────────────────
 _http: aiohttp.ClientSession | None = None
 
@@ -49,7 +53,7 @@ def c_log(msg: str) -> None:
 # ─────────────────────────────────────────────────────────────
 bot_state: dict = {
     'status':            'RUNNING',
-    'symbol':            'XAUUSD@',
+    'symbol':            'XAUUSDm', # تأكد من اسم الرمز في حساب الميتاتريدر الخاص بك
     'live_connected':    False,
     'timeframes':        _TFS,
     'active_tfs':        {
@@ -57,7 +61,7 @@ bot_state: dict = {
         '6m': False, '10m': False, '12m': False, '15m': False,
         '20m': False, '30m': False, '1h': False, '2h': False
     },
-    'cache':             {tf: pd.DataFrame() for tf in _TFS}, # محرك الذاكرة الذكي
+    'cache':             {tf: pd.DataFrame() for tf in _TFS},
     'lot_size':          0.05,
     'pip_value':         0.1,
     'spread_pips':       2.2,
@@ -144,14 +148,11 @@ async def daily_drawdown_monitor() -> None:
         try:
             if not (bot_state['live_connected'] and bot_state['connection_obj']):
                 continue
-
             today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
             if bot_state['sod_date'] != today or bot_state['sod_balance'] is None:
                 await _capture_sod_balance()
                 continue
-
-            if bot_state['dd_triggered']:
-                continue
+            if bot_state['dd_triggered']: continue
 
             info     = await bot_state['connection_obj'].get_account_information()
             equity   = float(info.get('equity', 0))
@@ -351,7 +352,7 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     high_max = df['high'].rolling(k_period).max()
     denom    = (high_max - low_min).replace(0, 1e-10)
     
-    # ── FIXED MT5 STOCHASTIC SMOOTHING ──
+    # ── MT5 STOCHASTIC SMOOTHING ──
     df['Fast_K'] = 100.0 * (df['close'] - low_min) / denom
     df['K'] = df['Fast_K'].rolling(window=smooth).mean()
     df['D'] = df['K'].ewm(alpha=1.0/d_period, adjust=False).mean()
@@ -430,93 +431,96 @@ def _get_signal_for_bar(df, i, curr, prev) -> tuple:
     return buy_sig, sell_sig, (b_lbl if buy_sig else s_lbl)
 
 # ─────────────────────────────────────────────────────────────
-# OANDA REST
+# DERIV WEBSOCKET FETCHER
 # ─────────────────────────────────────────────────────────────
 _TF_MAP = {
-    's5': 'S5', '1m': 'M1', '2m': 'M2', '3m': 'M3', '4m': 'M4', '5m': 'M5',
-    '6m': 'M6', '10m': 'M10', '12m': 'M12', '15m': 'M15', '20m': 'M20',
-    '30m': 'M30', '1h': 'H1', '2h': 'H2'
+    '1m': 60, '2m': 120, '3m': 180, '5m': 300, '10m': 600,
+    '15m': 900, '30m': 1800, '1h': 3600, '2h': 7200
 }
 
-_oanda_live_sem: asyncio.Semaphore | None = None
-_oanda_bt_sem:   asyncio.Semaphore | None = None
+_deriv_sem: asyncio.Semaphore | None = None
 
-def _get_live_sem():
-    global _oanda_live_sem
-    if _oanda_live_sem is None: _oanda_live_sem = asyncio.Semaphore(3)
-    return _oanda_live_sem
+def _get_deriv_sem():
+    global _deriv_sem
+    if _deriv_sem is None: _deriv_sem = asyncio.Semaphore(2)
+    return _deriv_sem
 
-def _get_bt_sem():
-    global _oanda_bt_sem
-    if _oanda_bt_sem is None: _oanda_bt_sem = asyncio.Semaphore(2)
-    return _oanda_bt_sem
-
-async def fetch_oanda_candles(instrument, granularity, count=5000, end_time=None, _backtest=False):
-    url     = f'{OANDA_URL}/instruments/{instrument}/candles'
-    headers = {'Authorization': f'Bearer {OANDA_API}'}
-    mapped_gran = _TF_MAP.get(granularity, 'M5')
-    valid_oanda_grans = {'S5','S10','S15','S30','M1','M2','M3','M4','M5','M10','M15','M30','H1','H2','H3','H4','H6','H8','H12','D','W','M'}
+async def fetch_deriv_candles(granularity_str: str, count: int = 5000, end_time: datetime = None):
+    resample_needed = False
+    target_gran = _TF_MAP.get(granularity_str)
     
-    needs_resample = mapped_gran not in valid_oanda_grans
-    fetch_gran = 'M1' if needs_resample else mapped_gran
-    
-    if needs_resample:
-        if 'm' in granularity:
-            multiplier = int(granularity.replace('m', ''))
-        elif 'h' in granularity:
-            multiplier = int(granularity.replace('h', '')) * 60
-        else:
-            multiplier = 1
+    if not target_gran:
+        resample_needed = True
+        fetch_gran = 60 # سحب دقيقة وتشكيلها
+        multiplier = int(granularity_str.replace('m', '').replace('h', '0'))
+        if 'h' in granularity_str: multiplier *= 60
         fetch_count = min(count * multiplier, 15000)
     else:
-        fetch_count = min(count, 15000)
+        fetch_gran = target_gran
+        fetch_count = min(count, 10000)
 
-    sem = _get_bt_sem() if _backtest else _get_live_sem()
+    collected = []
+    current_end = int(end_time.timestamp()) if end_time else "latest"
+    remaining = fetch_count
+
+    sem = _get_deriv_sem()
     async with sem:
-        collected = []
-        current_end = end_time
-        remaining = fetch_count
-        
-        while remaining > 0:
-            chunk = min(remaining, 5000)
-            params = {'granularity': fetch_gran, 'count': chunk, 'price': 'B'} # 'B' لجلب سعر Bid كما في MT5
-            if current_end: params['to'] = current_end.strftime('%Y-%m-%dT%H:%M:%SZ')
-            
-            candles = []
-            for attempt in range(3):
-                try:
-                    async with get_http().get(url, headers=headers, params=params) as resp:
-                        if resp.status == 200:
-                            data = json.loads(await resp.text())
-                            candles = [{'time': pd.to_datetime(c['time'], utc=True),
-                                     'open': float(c['bid']['o']), 'high': float(c['bid']['h']),
-                                     'low':  float(c['bid']['l']), 'close': float(c['bid']['c'])}
-                                    for c in data.get('candles', []) if c['complete']]
+        try:
+            async with websockets.connect(DERIV_WS_URL) as ws:
+                while remaining > 0:
+                    chunk = min(remaining, 5000) # Deriv Max per request is 5000
+                    req = {
+                        "ticks_history": DERIV_SYMBOL,
+                        "adjust_start_time": 1,
+                        "count": chunk,
+                        "end": current_end,
+                        "start": 1,
+                        "style": "candles",
+                        "granularity": fetch_gran
+                    }
+                    
+                    for attempt in range(3):
+                        try:
+                            await ws.send(json.dumps(req))
+                            resp = await asyncio.wait_for(ws.recv(), timeout=10.0)
+                            data = json.loads(resp)
+                            
+                            if 'error' in data:
+                                c_log(f"Deriv API Error: {data['error']['message']}")
+                                break
+                            
+                            candles = data.get('candles', [])
+                            if not candles: break
+                            
+                            formatted = [{
+                                'time': pd.to_datetime(c['epoch'], unit='s', utc=True),
+                                'open': float(c['open']),
+                                'high': float(c['high']),
+                                'low': float(c['low']),
+                                'close': float(c['close'])
+                            } for c in candles]
+                            
+                            collected = formatted + collected
+                            remaining -= len(candles)
+                            
+                            # Update end time for pagination
+                            current_end = candles[0]['epoch'] - 1
+                            
+                            if len(candles) < chunk: remaining = 0
                             break
-                        elif resp.status == 429:
-                            await asyncio.sleep(2 ** attempt)
-                        else:
+                        except Exception as e:
+                            c_log(f"WS fetch error attempt {attempt+1}: {e}")
                             await asyncio.sleep(1)
-                except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                    await asyncio.sleep(1)
-            
-            if not candles:
-                break
-                
-            collected = candles + collected
-            remaining -= len(candles)
-            
-            new_end = candles[0]['time']
-            if current_end and new_end >= current_end: break
-            current_end = new_end
-            
-            if len(candles) < chunk: break
-            if remaining > 0: await asyncio.sleep(0.2)
-            
-    if needs_resample and collected:
+                            
+                    if remaining <= 0 or not candles: break
+                    await asyncio.sleep(0.5)
+        except Exception as e:
+            c_log(f"WebSocket Connection Error: {e}")
+
+    if resample_needed and collected:
         df = pd.DataFrame(collected)
         df.set_index('time', inplace=True)
-        rule = granularity.replace('m', 'min').replace('h', 'h')
+        rule = granularity_str.replace('m', 'min').replace('h', 'h')
         resampled = df.resample(rule).agg({
             'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'
         }).dropna().reset_index()
@@ -790,19 +794,15 @@ def _build_final_summary(desc, trade_logs, blocked_logs, win_count, loss_count,
         f'Sending Excel file...'
     )
 
-async def _fetch_1m_candles(start_dt, tf_end):
+async def _fetch_1m_candles_for_bt(start_dt, tf_end):
     total_min = int((tf_end - start_dt).total_seconds() / 60) + 72 * 60 + 60
-    m1_raw = await fetch_oanda_candles('XAU_USD', '1m', total_min, tf_end, _backtest=True)
+    m1_raw = await fetch_deriv_candles('1m', count=total_min, end_time=tf_end)
     return sorted(m1_raw, key=lambda x: x['time'])
 
 # ─────────────────────────────────────────────────────────────
-# BACKTESTING (OMITTED REDUNDANCY FOR CLARITY - IDENTICAL TO v4.3.1)
+# BACKTESTING
 # ─────────────────────────────────────────────────────────────
-# ... (Standard and Advanced Backtests remain unchanged and function perfectly)
-# Note: For brevity in reading, the full run_oanda_backtest and run_advanced_backtest
-# are kept identical in actual execution.
-async def run_oanda_backtest(start_dt: datetime) -> None:
-    # [Identical logic to v4.3.1]
+async def run_deriv_backtest(start_dt: datetime) -> None:
     global _bt_progress
     if bot_state['is_backtesting']: return
     bot_state['is_backtesting'] = True
@@ -820,13 +820,16 @@ async def run_oanda_backtest(start_dt: datetime) -> None:
         for tf in active_tfs:
             if prog.cancelled: break
             await asyncio.sleep(0)
-            await prog.set_phase(f'Loading [{tf}]...')
-            c_data = await fetch_oanda_candles('XAU_USD', tf, 5000, _backtest=True)
+            await prog.set_phase(f'إحماء الذاكرة وجلب الشموع [{tf}]...')
+            
+            # سحب 10000 شمعة لدقة الإحماء (Warm-up)
+            c_data = await fetch_deriv_candles(tf, count=10000)
             if len(c_data) < 150: await prog.finish_tf(); continue
             df         = calculate_indicators(pd.DataFrame(c_data).sort_values('time').reset_index(drop=True))
             safe_start = max(10, bot_state['cons_count'])
+            
             await prog.set_phase(f'Loading 1m for [{tf}]...')
-            minute_candles = await _fetch_1m_candles(start_dt, datetime.now(timezone.utc))
+            minute_candles = await _fetch_1m_candles_for_bt(start_dt, datetime.now(timezone.utc))
             bar_index = df[df['time'] >= start_dt].index.tolist()
             await prog.set_tf(tf, len(bar_index))
             for loop_pos, i in enumerate(bar_index):
@@ -884,8 +887,134 @@ async def run_oanda_backtest(start_dt: datetime) -> None:
         bot_state['is_backtesting'] = False; _bt_progress = None
 
 async def run_advanced_backtest(days: int = 7) -> None:
-    # [Identical logic to v4.3.1 - Omitted redundant text block]
-    pass
+    global _bt_progress
+    if bot_state['is_backtesting']: return
+    bot_state['is_backtesting'] = True
+    start_dt   = datetime.now(timezone.utc) - timedelta(days=days)
+    active_tfs = [tf for tf in bot_state['timeframes'] if bot_state['active_tfs'][tf]]
+    desc       = f"{bot_state['strategy_mode']} / {bot_state['filter_mode']}"
+    prog = BtProgress(label=f'{desc} ({days}d)', active_tfs=active_tfs, is_advanced=True)
+    _bt_progress = prog
+    await prog.start(bot_state['chat_id'])
+    trade_logs, blocked_logs = [], []
+    total_prof  = peak_equity = max_dd = 0.0
+    total_win   = total_loss  = 0.0
+    win_count   = loss_count  = be_count = 0
+    long_win    = long_loss   = short_win = short_loss = 0
+    all_profits = []
+    consec_win  = consec_loss = max_cw = max_cl = 0
+    max_cw_usd  = max_cl_usd = cur_w = cur_l = 0.0
+    try:
+        for tf in active_tfs:
+            if prog.cancelled: break
+            await asyncio.sleep(0)
+            await prog.set_phase(f'إحماء الذاكرة وجلب الشموع [{tf}]...')
+            c_data = await fetch_deriv_candles(tf, count=10000)
+            if len(c_data) < 150: await prog.finish_tf(); continue
+            df         = calculate_indicators(pd.DataFrame(c_data).sort_values('time').reset_index(drop=True))
+            safe_start = max(10, bot_state['cons_count'])
+            await prog.set_phase(f'Loading 1m for [{tf}]...')
+            minute_candles = await _fetch_1m_candles_for_bt(start_dt, datetime.now(timezone.utc))
+            bar_index = df[df['time'] >= start_dt].index.tolist()
+            await prog.set_tf(tf, len(bar_index))
+            for loop_pos, i in enumerate(bar_index):
+                if prog.cancelled: break
+                if i < safe_start: continue
+                if loop_pos % 50 == 0:
+                    await asyncio.sleep(0)
+                    await prog.tick(loop_pos, win_count, loss_count, be_count, total_prof)
+                curr = df.loc[i]; prev = df.loc[i - 1]
+                if bot_state['use_danger_filter'] and is_blocked_time(curr['time']): continue
+                buy_sig, sell_sig, label = _get_signal_for_bar(df, i, curr, prev)
+                raw_buy, raw_sell, b_lbl, s_lbl = get_stoch_signals(prev['K'], prev['D'], curr['K'], curr['D'])
+                ts = (curr['time'] + timedelta(hours=3)).strftime('%Y-%m-%d %H:%M')
+                if not buy_sig  and raw_buy:
+                    blocked_logs.append({'Timeframe': tf, 'Type': f'BUY BLOCKED ({b_lbl})', 'Entry Time': ts, 'Entry Price': curr['close'], 'Reason': f'REJECTED ({bot_state["filter_mode"]})'})
+                if not sell_sig and raw_sell:
+                    blocked_logs.append({'Timeframe': tf, 'Type': f'SELL BLOCKED ({s_lbl})', 'Entry Time': ts, 'Entry Price': curr['close'], 'Reason': f'REJECTED ({bot_state["filter_mode"]})'})
+                if not (buy_sig or sell_sig) or i + 1 >= len(df): continue
+                next_c = df.loc[i + 1]; entry_t = next_c['time']; is_buy = bool(buy_sig)
+                sig_bar = next_c.copy(); sig_bar['atr'] = curr['atr']
+                act_ent, tp_p, sl_p, eff_tp = _entry_params(sig_bar, is_buy, tf)
+                outcome, exit_t, sl_p = _simulate_trade_in_memory(is_buy, act_ent, tp_p, sl_p, eff_tp, entry_t, minute_candles)
+                p_usd = _calc_pnl(outcome, act_ent, tp_p, sl_p)
+                if outcome == 'WIN':
+                    total_win += p_usd; win_count += 1
+                    consec_win += 1; cur_w += p_usd; consec_loss = 0; cur_l = 0.0
+                    if consec_win > max_cw: max_cw = consec_win; max_cw_usd = cur_w
+                    if is_buy: long_win  += 1
+                    else:      short_win += 1
+                elif outcome == 'LOSS':
+                    total_loss  += p_usd; loss_count  += 1
+                    consec_loss += 1; cur_l += p_usd; consec_win = 0; cur_w = 0.0
+                    if consec_loss > max_cl: max_cl = consec_loss; max_cl_usd = cur_l
+                    if is_buy: long_loss  += 1
+                    else:      short_loss += 1
+                elif outcome == 'BREAK-EVEN':
+                    be_count += 1
+                total_prof += p_usd; peak_equity = max(peak_equity, total_prof)
+                max_dd = max(max_dd, peak_equity - total_prof); all_profits.append(p_usd)
+                row = _build_trade_row(tf, is_buy, label, entry_t, exit_t, act_ent, tp_p, sl_p, outcome, p_usd)
+                row['Hour_Damascus'] = (curr['time'].hour + 3) % 24
+                row['Weekday']       = curr['time'].strftime('%a')
+                trade_logs.append(row)
+            await prog.finish_tf()
+            await prog.tick(len(bar_index), win_count, loss_count, be_count, total_prof)
+        if not trade_logs:
+            await prog.done('No trades found.'); return
+        total_trades    = win_count + loss_count
+        win_rate        = round(win_count / total_trades * 100, 1) if total_trades else 0
+        dd_pct          = round(max_dd / peak_equity * 100, 1)     if peak_equity  else 0
+        profit_factor   = round(total_win / abs(total_loss), 2)    if total_loss   else 999.0
+        expected_payoff = round(total_prof / total_trades, 2)       if total_trades else 0
+        recovery_factor = round(total_prof / max_dd, 2)             if max_dd       else 999.0
+        wins_only       = [p for p in all_profits if p > 0]
+        losses_only     = [p for p in all_profits if p < 0]
+        avg_win         = round(sum(wins_only)   / len(wins_only),   2) if wins_only   else 0
+        avg_loss        = round(sum(losses_only) / len(losses_only), 2) if losses_only else 0
+        largest_win     = round(max(wins_only),  2) if wins_only   else 0
+        largest_loss    = round(min(losses_only), 2) if losses_only else 0
+        df_t        = pd.DataFrame(trade_logs)
+        actv        = df_t[df_t['Outcome'].isin(['WIN', 'LOSS'])]
+        hour_counts = actv.groupby('Hour_Damascus').size()
+        day_counts  = actv.groupby('Weekday').size()
+        def barchart(dd, width=18):
+            if not dd: return '(no data)'
+            mx = max(dd.values())
+            return '\n'.join(f'  {str(k):>4} |{"#" * int(v/mx*width):<{width}}| {v}' for k, v in sorted(dd.items()))
+        await prog.done(_build_final_summary(desc, trade_logs, blocked_logs, win_count, loss_count,
+                                              be_count, total_win, total_loss, total_prof, peak_equity, max_dd))
+        report = (
+            f'<b>Advanced Report {days}d</b>\n{desc}\n'
+            f'Net: ${round(total_prof,2)} | PF:{profit_factor} | RF:{recovery_factor}\n'
+            f'DD: ${round(max_dd,2)} ({dd_pct}%)\n'
+            f'{total_trades} trades | W:{win_count}({win_rate}%) | L:{loss_count}\n'
+            f'Long W/L:{long_win}/{long_loss} | Short W/L:{short_win}/{short_loss}\n'
+            f'BE:{be_count}\n'
+            f'MaxWin:+${largest_win} MaxLoss:${largest_loss}\n'
+            f'AvgWin:+${avg_win} AvgLoss:${avg_loss}\n'
+            f'Streak W:{max_cw}(+${round(max_cw_usd,2)}) L:{max_cl}(-${abs(round(max_cl_usd,2))})\n'
+            f'<b>By Hour:</b>\n<pre>{barchart(hour_counts.to_dict())}</pre>\n'
+            f'<b>By Day:</b>\n<pre>{barchart(day_counts.to_dict())}</pre>'
+        )
+        await send_tg_msg(report)
+        xlsx_adv = f"ADV_{datetime.now().strftime('%H%M%S')}.xlsx"
+        df_exec  = df_t.drop(columns=['Hour_Damascus', 'Weekday'], errors='ignore')
+        stats = {
+            'Metric': ['Net','Win','Loss','PF','EP','RF','MaxDD','DD%','Trades','Wins','Losses','WR','BE','LongWL','ShortWL','MaxWin','MaxLoss','AvgWin','AvgLoss','WinStreak','LossStreak','Strategy'],
+            'Value':  [f'${round(total_prof,2)}',f'+${round(total_win,2)}',f'-${abs(round(total_loss,2))}',profit_factor,expected_payoff,recovery_factor,f'${round(max_dd,2)}',f'{dd_pct}%',total_trades,win_count,loss_count,f'{win_rate}%',be_count,f'{long_win}/{long_loss}',f'{short_win}/{short_loss}',f'+${largest_win}',f'${largest_loss}',f'+${avg_win}',f'${avg_loss}',f'{max_cw}(+${round(max_cw_usd,2)})',f'{max_cl}(-${abs(round(max_cl_usd,2))})',desc],
+        }
+        with pd.ExcelWriter(xlsx_adv, engine='openpyxl') as writer:
+            df_exec.to_excel(writer, sheet_name='Trades', index=False)
+            pd.DataFrame(stats).to_excel(writer, sheet_name='Stats', index=False)
+            if blocked_logs: pd.DataFrame(blocked_logs).to_excel(writer, sheet_name='Blocked', index=False)
+            _style_sheet(writer.sheets['Trades'])
+        await send_tg_document(xlsx_adv, f'Advanced Report {days}d | {desc}')
+        os.remove(xlsx_adv)
+    except Exception as e:
+        await prog.done(f'ERROR: {e}'); c_log(f'Advanced BT error: {e}')
+    finally:
+        bot_state['is_backtesting'] = False; _bt_progress = None
 
 def _style_sheet(ws) -> None:
     from openpyxl.styles import PatternFill, Font
@@ -940,54 +1069,48 @@ async def timeframe_scanner(tf: str) -> None:
                 bot_state['market_data'][tf] = 'DD PAUSED'
                 await asyncio.sleep(30); continue
 
-            # ── 1. محرك الذاكرة: مرحلة الإحماء الأولي (Warm-up) ──
+            # ── 1. محرك الذاكرة: مرحلة الإحماء الأولي (Warm-up) عبر Deriv ──
             if bot_state['cache'][tf].empty:
                 await send_tg_msg(
-                    f"⏳ <b>[نظام الذاكرة]</b>\n"
+                    f"⏳ <b>[نظام الذاكرة Deriv]</b>\n"
                     f"بدء إحماء فريم <b>[{tf}]</b>...\n"
                     f"جاري سحب 5000 شمعة تاريخية لضبط معيار MT5."
                 )
-                c_log(f'[{tf}] WARM-UP: Fetching 5000 historical candles...')
+                c_log(f'[{tf}] WARM-UP: Fetching 5000 historical candles from Deriv...')
                 try:
-                    raw = await fetch_oanda_candles('XAU_USD', tf, count=5000)
+                    raw = await fetch_deriv_candles(tf, count=5000)
                     if not raw:
                         c_log(f'[{tf}] WARM-UP FAILED: No data received.')
                         await asyncio.sleep(15); continue
                         
                     bot_state['cache'][tf] = pd.DataFrame(raw)
                     await send_tg_msg(
-                        f"✅ <b>[نظام الذاكرة]</b>\n"
+                        f"✅ <b>[نظام الذاكرة Deriv]</b>\n"
                         f"اكتمل إحماء <b>[{tf}]</b> بنجاح!\n"
                         f"تم تخزين {len(raw)} شمعة. البوت يعمل الآن بدقة 100%."
                     )
                     c_log(f'[{tf}] WARM-UP SUCCESS: Cached {len(raw)} candles.')
                 except Exception as e:
                     c_log(f'[{tf}] WARM-UP ERROR: {e}')
-                    await send_tg_msg(f"❌ <b>[نظام الذاكرة]</b>\nخطأ أثناء إحماء <b>[{tf}]</b>:\n{e}\nسيعاود المحاولة...")
+                    await send_tg_msg(f"❌ <b>[نظام الذاكرة Deriv]</b>\nخطأ أثناء إحماء <b>[{tf}]</b>:\n{e}\nسيعاود المحاولة...")
                     await asyncio.sleep(15); continue
 
-            # ── 2. محرك الذاكرة: مرحلة التحديث النبضي (Pulse Update) ──
+            # ── 2. محرك الذاكرة: مرحلة التحديث النبضي (Pulse Update) عبر Deriv ──
             try:
-                # سحب آخر 10 شموع فقط لتقليل الضغط وتحديث الذاكرة
-                raw_new = await fetch_oanda_candles('XAU_USD', tf, count=10)
+                raw_new = await fetch_deriv_candles(tf, count=10)
                 if not raw_new:
                     await asyncio.sleep(10); continue
                     
                 df_new = pd.DataFrame(raw_new)
                 df_cached = bot_state['cache'][tf]
                 
-                # دمج الشموع الجديدة مع الذاكرة القديمة وحذف التكرار
                 df_combined = pd.concat([df_cached, df_new], ignore_index=True)
                 df_combined.drop_duplicates(subset=['time'], keep='last', inplace=True)
                 
-                # الاحتفاظ بآخر 5000 شمعة فقط لعدم إرهاق الرام
                 df_combined = df_combined.tail(5000).reset_index(drop=True)
                 bot_state['cache'][tf] = df_combined
                 
-                # طباعة سجل التحديث في شاشة Terminal (شفافية تامة أمام عينيك)
-                c_log(f'[{tf}] Pulse Update: Appended latest candles. Total cache: {len(df_combined)}.')
-                
-                # حساب المؤشرات على الذاكرة الكاملة المدمجة
+                c_log(f'[{tf}] Pulse Update (Deriv): Appended latest candles. Total cache: {len(df_combined)}.')
                 df = calculate_indicators(df_combined.copy())
             except Exception as e:
                 c_log(f'[{tf}] PULSE ERROR: {e}')
@@ -1089,9 +1212,9 @@ async def process_tg_update(update: dict) -> None:
 
         if msg == '/start':
             await send_tg_msg(
-                '<b>Gold Scalper Bot v4.4</b>\n'
+                '<b>Gold Scalper Bot v4.5 (Deriv WS)</b>\n'
                 'Strategies: STOCH-NEW | STOCH-OLD\n'
-                'Smart Cache Engine: ENABLED\n'
+                'Data Engine: Deriv WebSockets (1089)\n'
                 'Daily DD protection: 3%',
                 get_main_keyboard()
             )
@@ -1122,7 +1245,7 @@ async def process_tg_update(update: dict) -> None:
                 if bot_state['is_backtesting']:
                     await send_tg_msg('A backtest is already running.', _get_cancel_kbd_for_running())
                 else:
-                    asyncio.create_task(run_oanda_backtest(start_dt))
+                    asyncio.create_task(run_deriv_backtest(start_dt))
             except (IndexError, ValueError):
                 await send_tg_msg('Usage: /backtest YYYY-MM-DD')
 
@@ -1154,13 +1277,13 @@ async def process_tg_update(update: dict) -> None:
             if not bot_state['account_obj']:
                 await send_tg_msg('Not connected.'); return
             try:
-                raw  = await fetch_oanda_candles('XAU_USD', '5m', count=5000)
+                raw  = await fetch_deriv_candles('5m', count=100)
                 df   = calculate_indicators(pd.DataFrame(raw))
                 curr = df.iloc[-2]
                 now  = datetime.now(timezone.utc)
                 blocked = bot_state['use_danger_filter'] and is_blocked_time(now)
                 await send_tg_msg(
-                    f'<b>Debug [5m]</b>\n'
+                    f'<b>Debug [5m] - Deriv Data</b>\n'
                     f'K:{curr["K"]:.2f} D:{curr["D"]:.2f}\n'
                     f'EMA15:{curr["ema15"]:.2f} EMA50:{curr["ema50"]:.2f} EMA150:{curr["ema150"]:.2f}\n'
                     f'ATR:{curr["atr"]:.2f}\n'
@@ -1243,7 +1366,6 @@ async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
                 bot_state['dd_triggered'] = False
                 await send_tg_msg('تم استئناف البوت. تم تصفير محفز خسارة 3%.')
             
-            # ── إفراغ الذاكرة عند إعادة التشغيل لتجنب أي فجوات ──
             for tf, is_active in bot_state['active_tfs'].items():
                 if is_active: bot_state['cache'][tf] = pd.DataFrame()
             await send_tg_msg('🔄 <b>تم استئناف العمل</b>\nتم تفريغ الذاكرة المؤقتة. سيبدأ البوت عملية إحماء جديدة لضمان دقة البيانات 100%.')
@@ -1266,7 +1388,6 @@ async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
                 await bot_state['connection_obj'].wait_synchronized()
                 bot_state['live_connected'] = True
                 
-                # إفراغ الذاكرة عند إعادة الاتصال
                 for tf in bot_state['timeframes']: bot_state['cache'][tf] = pd.DataFrame()
                 
                 await _capture_sod_balance()
@@ -1304,7 +1425,6 @@ async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
         tf = d[len('toggle_tf_'):]
         if tf in bot_state['active_tfs']: 
             bot_state['active_tfs'][tf] = not bot_state['active_tfs'][tf]
-            # إفراغ الذاكرة عند تشغيل فريم جديد لإجباره على الإحماء
             if bot_state['active_tfs'][tf]:
                 bot_state['cache'][tf] = pd.DataFrame()
         await edit_tg_msg(chat_id, msg_id, 'Timeframes:', get_tf_keyboard())
@@ -1390,7 +1510,7 @@ async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
         else:
             days  = int(d.split('_')[1])
             start = datetime.now(timezone.utc) - timedelta(days=days)
-            asyncio.create_task(run_oanda_backtest(start))
+            asyncio.create_task(run_deriv_backtest(start))
 
     elif d == 'close_all':
         if not (bot_state['live_connected'] and bot_state['connection_obj']):
@@ -1461,7 +1581,8 @@ async def handle_ping(request: web.Request) -> web.Response:
     dd     = 'TRIGGERED' if bot_state['dd_triggered'] else 'OK'
     return web.Response(
         text=(
-            f'Gold Scalper Bot v4.4\n'
+            f'Gold Scalper Bot v4.5\n'
+            f'Data Engine: Deriv WebSockets\n'
             f'Uptime: {uptime}\nLive: {live}\n'
             f'Backtest: {bt}\nSOD: {sod}\nDD: {dd}'
         ), content_type='text/plain'
