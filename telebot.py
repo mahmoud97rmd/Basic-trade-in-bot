@@ -1,5 +1,5 @@
 """
-Gold Scalper Bot — v4.5 (Deriv WebSocket Edition & Smart Cache)
+Gold Scalper Bot — v4.6 (Deriv WS + MA Gap Filter Edition)
 Strategies : STOCH-NEW  |  STOCH-OLD
 """
 
@@ -53,7 +53,7 @@ def c_log(msg: str) -> None:
 # ─────────────────────────────────────────────────────────────
 bot_state: dict = {
     'status':            'RUNNING',
-    'symbol':            'XAUUSDm', # تأكد من اسم الرمز في حساب الميتاتريدر الخاص بك
+    'symbol':            'XAUUSDm',
     'live_connected':    False,
     'timeframes':        _TFS,
     'active_tfs':        {
@@ -85,8 +85,13 @@ bot_state: dict = {
     'use_stoch_deep':    True,
     'use_stoch_mid':     True,
     'use_stoch_shal':    False,
-    'use_f_cons':        False,
-    'cons_count':        3,
+    
+    # --- MA Gap Filter State (بدلاً من فلتر الثبات) ---
+    'use_ma_gap_fixed':  False,
+    'ma_gap_pips':       10,
+    'use_ma_gap_atr':    False,
+    'ma_gap_atr_mult':   0.5,
+    
     'use_be':            False,
     'use_atr':           False,
     'use_max_spread':    True,
@@ -333,7 +338,7 @@ def _get_cancel_kbd_for_running() -> dict:
     return {'inline_keyboard': [[{'text': 'عرض التقدم', 'callback_data': 'bt_show_progress'}], [{'text': 'إلغاء', 'callback_data': 'cancel_bt'}]]}
 
 # ─────────────────────────────────────────────────────────────
-# INDICATOR ENGINE (MT5 MATCHED)
+# INDICATOR ENGINE
 # ─────────────────────────────────────────────────────────────
 def _ema(series: pd.Series, span: int) -> pd.Series:
     return series.ewm(span=span, adjust=False).mean()
@@ -352,7 +357,6 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     high_max = df['high'].rolling(k_period).max()
     denom    = (high_max - low_min).replace(0, 1e-10)
     
-    # ── MT5 STOCHASTIC SMOOTHING ──
     df['Fast_K'] = 100.0 * (df['close'] - low_min) / denom
     df['K'] = df['Fast_K'].rolling(window=smooth).mean()
     df['D'] = df['K'].ewm(alpha=1.0/d_period, adjust=False).mean()
@@ -396,29 +400,28 @@ def get_stoch_signals(prev_k, prev_d, curr_k, curr_d) -> tuple:
 def compute_trend_ok(df, i, curr) -> tuple:
     mode = bot_state['filter_mode']
     if mode == 'NO_MA': return True, True
-    cons  = bot_state['cons_count'] if bot_state['use_f_cons'] else 1
-    b_ema = s_ema = True
-    for j in range(cons):
-        idx = i - j
-        if idx not in df.index: return False, False
-        c = df.loc[idx]
-        if not (c['ema50'] > c['ema150']): b_ema = False
-        if not (c['ema150'] > c['ema50']): s_ema = False
+    
+    # 1. الترتيب الأساسي
+    b_ema = curr['ema50'] > curr['ema150']
+    s_ema = curr['ema150'] > curr['ema50']
+    
+    # 2. فجوة الأمان (MA Gap Filter)
+    gap_ok = True
+    gap_val = abs(curr['ema50'] - curr['ema150'])
+    
+    if bot_state['use_ma_gap_fixed']:
+        if gap_val < (bot_state['ma_gap_pips'] * bot_state['pip_value']):
+            gap_ok = False
+            
+    if bot_state['use_ma_gap_atr']:
+        if gap_val < (curr['atr'] * bot_state['ma_gap_atr_mult']):
+            gap_ok = False
+            
+    b_ema = b_ema and gap_ok
+    s_ema = s_ema and gap_ok
+    
     if mode == 'SIMPLE': return b_ema, s_ema
-    ma_buy  = curr['ema15'] > curr['ema50'] > curr['ema150']
-    ma_sell = curr['ema15'] < curr['ema50'] < curr['ema150']
-    return (b_ema and ma_buy), (s_ema and ma_sell)
-
-def compute_trend_ok_live(df, curr) -> tuple:
-    mode = bot_state['filter_mode']
-    if mode == 'NO_MA': return True, True
-    cons  = bot_state['cons_count'] if bot_state['use_f_cons'] else 1
-    b_ema = s_ema = True
-    for j in range(cons):
-        c = df.iloc[(-2) - j]
-        if not (c['ema50'] > c['ema150']): b_ema = False
-        if not (c['ema150'] > c['ema50']): s_ema = False
-    if mode == 'SIMPLE': return b_ema, s_ema
+    
     ma_buy  = curr['ema15'] > curr['ema50'] > curr['ema150']
     ma_sell = curr['ema15'] < curr['ema50'] < curr['ema150']
     return (b_ema and ma_buy), (s_ema and ma_sell)
@@ -451,7 +454,7 @@ async def fetch_deriv_candles(granularity_str: str, count: int = 5000, end_time:
     
     if not target_gran:
         resample_needed = True
-        fetch_gran = 60 # سحب دقيقة وتشكيلها
+        fetch_gran = 60
         multiplier = int(granularity_str.replace('m', '').replace('h', '0'))
         if 'h' in granularity_str: multiplier *= 60
         fetch_count = min(count * multiplier, 15000)
@@ -468,7 +471,7 @@ async def fetch_deriv_candles(granularity_str: str, count: int = 5000, end_time:
         try:
             async with websockets.connect(DERIV_WS_URL) as ws:
                 while remaining > 0:
-                    chunk = min(remaining, 5000) # Deriv Max per request is 5000
+                    chunk = min(remaining, 5000)
                     req = {
                         "ticks_history": DERIV_SYMBOL,
                         "adjust_start_time": 1,
@@ -503,7 +506,6 @@ async def fetch_deriv_candles(granularity_str: str, count: int = 5000, end_time:
                             collected = formatted + collected
                             remaining -= len(candles)
                             
-                            # Update end time for pagination
                             current_end = candles[0]['epoch'] - 1
                             
                             if len(candles) < chunk: remaining = 0
@@ -604,7 +606,6 @@ def get_filters_keyboard() -> dict:
     dp = 'ON' if bot_state['use_stoch_deep'] else 'OFF'
     md = 'ON' if bot_state['use_stoch_mid']  else 'OFF'
     sh = 'ON' if bot_state['use_stoch_shal'] else 'OFF'
-    ci = 'ON' if bot_state['use_f_cons']     else 'OFF'
     d_i = 'ON' if bot_state['use_danger_filter'] else 'OFF'
     k, s, d = bot_state['stoch_k'], bot_state['stoch_smooth'], bot_state['stoch_d']
     return {'inline_keyboard': [
@@ -612,15 +613,33 @@ def get_filters_keyboard() -> dict:
         [{'text': f"{fi['FULL']} FULL: ema15+ema50+ema150", 'callback_data': 'set_filter_full'}],
         [{'text': f"{fi['SIMPLE']} SIMPLE: ema50+ema150",   'callback_data': 'set_filter_simple'}],
         [{'text': f"{fi['NO_MA']} NO MA",                   'callback_data': 'set_filter_noma'}],
+        [{'text': '-- MA Gap Filter --', 'callback_data': 'noop'}],
+        [{'text': '⚙️ إعدادات فجوة الموفينجات (MA Gap)', 'callback_data': 'menu_ma_gap'}],
         [{'text': '-- Stochastic Levels --', 'callback_data': 'noop'}],
         [{'text': f'Stoch({k},{s},{d})', 'callback_data': 'menu_stoch_settings'}],
         [{'text': f'DEEP 10/90: {dp}',   'callback_data': 'toggle_stoch_deep'},
          {'text': f'MID  15/85: {md}',   'callback_data': 'toggle_stoch_mid'},
          {'text': f'SHAL 20/80: {sh}',   'callback_data': 'toggle_stoch_shal'}],
-        [{'text': f'Trend Consistency ({bot_state["cons_count"]} bars): {ci}', 'callback_data': 'toggle_f_cons'}],
         [{'text': '-- Time Filter (Danger Zones) --', 'callback_data': 'noop'}],
         [{'text': f'Block (13, 18, 21, 22 Damascus): {d_i}', 'callback_data': 'toggle_danger'}],
         [{'text': 'Back', 'callback_data': 'menu_main'}],
+    ]}
+
+def get_ma_gap_keyboard() -> dict:
+    fx_i = 'ON' if bot_state['use_ma_gap_fixed'] else 'OFF'
+    at_i = 'ON' if bot_state['use_ma_gap_atr'] else 'OFF'
+    pips = bot_state['ma_gap_pips']
+    mult = bot_state['ma_gap_atr_mult']
+    return {'inline_keyboard': [
+        [{'text': f'Fixed Pips Gap: {fx_i}', 'callback_data': 'toggle_ma_gap_fixed'}],
+        [{'text': '-', 'callback_data': 'dec_gap_pips'},
+         {'text': f'{pips} Pips', 'callback_data': 'noop'},
+         {'text': '+', 'callback_data': 'inc_gap_pips'}],
+        [{'text': f'ATR Multiplier Gap: {at_i}', 'callback_data': 'toggle_ma_gap_atr'}],
+        [{'text': '-', 'callback_data': 'dec_gap_atr'},
+         {'text': f'{mult}x ATR', 'callback_data': 'noop'},
+         {'text': '+', 'callback_data': 'inc_gap_atr'}],
+        [{'text': 'Back', 'callback_data': 'menu_filters'}],
     ]}
 
 def get_stoch_settings_keyboard() -> dict:
@@ -718,6 +737,7 @@ def get_backtest_keyboard() -> dict:
 # ─────────────────────────────────────────────────────────────
 def _build_trade_row(tf, is_buy, label, entry_t, exit_t, act_ent, tp_p, sl_p, outcome, p_usd):
     pv = bot_state['pip_value']
+    # تم إزالة +3 ساعات لتتطابق الأوقات مع شاشة Deriv (توقيت السيرفر)
     return {
         'Timeframe':   tf,
         'Type':        ('BUY' if is_buy else 'SELL') + f' [{label}]',
@@ -822,11 +842,10 @@ async def run_deriv_backtest(start_dt: datetime) -> None:
             await asyncio.sleep(0)
             await prog.set_phase(f'إحماء الذاكرة وجلب الشموع [{tf}]...')
             
-            # سحب 10000 شمعة لدقة الإحماء (Warm-up)
             c_data = await fetch_deriv_candles(tf, count=10000)
             if len(c_data) < 150: await prog.finish_tf(); continue
             df         = calculate_indicators(pd.DataFrame(c_data).sort_values('time').reset_index(drop=True))
-            safe_start = max(10, bot_state['cons_count'])
+            safe_start = max(10, 3) # تم إزالة الاعتماد على cons_count هنا لعدم وجوده
             
             await prog.set_phase(f'Loading 1m for [{tf}]...')
             minute_candles = await _fetch_1m_candles_for_bt(start_dt, datetime.now(timezone.utc))
@@ -842,11 +861,11 @@ async def run_deriv_backtest(start_dt: datetime) -> None:
                 if bot_state['use_danger_filter'] and is_blocked_time(curr['time']): continue
                 buy_sig, sell_sig, label = _get_signal_for_bar(df, i, curr, prev)
                 raw_buy, raw_sell, b_lbl, s_lbl = get_stoch_signals(prev['K'], prev['D'], curr['K'], curr['D'])
-                ts = curr['time'].strftime('%Y-%m-%d %H:%M')
+                ts = curr['time'].strftime('%Y-%m-%d %H:%M') # توقيت السيرفر
                 if not buy_sig  and raw_buy:
-                    blocked_logs.append({'Timeframe': tf, 'Type': f'BUY BLOCKED ({b_lbl})', 'Entry Time': ts, 'Entry Price': curr['close'], 'Reason': f'REJECTED ({bot_state["filter_mode"]})'})
+                    blocked_logs.append({'Timeframe': tf, 'Type': f'BUY BLOCKED ({b_lbl})', 'Entry Time': ts, 'Entry Price': curr['close'], 'Reason': f'REJECTED ({bot_state["filter_mode"]} + MA GAP)'})
                 if not sell_sig and raw_sell:
-                    blocked_logs.append({'Timeframe': tf, 'Type': f'SELL BLOCKED ({s_lbl})', 'Entry Time': ts, 'Entry Price': curr['close'], 'Reason': f'REJECTED ({bot_state["filter_mode"]})'})
+                    blocked_logs.append({'Timeframe': tf, 'Type': f'SELL BLOCKED ({s_lbl})', 'Entry Time': ts, 'Entry Price': curr['close'], 'Reason': f'REJECTED ({bot_state["filter_mode"]} + MA GAP)'})
                 if not (buy_sig or sell_sig) or i + 1 >= len(df): continue
                 next_c = df.loc[i + 1]; entry_t = next_c['time']; is_buy = bool(buy_sig)
                 sig_bar = next_c.copy(); sig_bar['atr'] = curr['atr']
@@ -912,7 +931,7 @@ async def run_advanced_backtest(days: int = 7) -> None:
             c_data = await fetch_deriv_candles(tf, count=10000)
             if len(c_data) < 150: await prog.finish_tf(); continue
             df         = calculate_indicators(pd.DataFrame(c_data).sort_values('time').reset_index(drop=True))
-            safe_start = max(10, bot_state['cons_count'])
+            safe_start = max(10, 3)
             await prog.set_phase(f'Loading 1m for [{tf}]...')
             minute_candles = await _fetch_1m_candles_for_bt(start_dt, datetime.now(timezone.utc))
             bar_index = df[df['time'] >= start_dt].index.tolist()
@@ -927,11 +946,11 @@ async def run_advanced_backtest(days: int = 7) -> None:
                 if bot_state['use_danger_filter'] and is_blocked_time(curr['time']): continue
                 buy_sig, sell_sig, label = _get_signal_for_bar(df, i, curr, prev)
                 raw_buy, raw_sell, b_lbl, s_lbl = get_stoch_signals(prev['K'], prev['D'], curr['K'], curr['D'])
-                ts = (curr['time'] + timedelta(hours=3)).strftime('%Y-%m-%d %H:%M')
+                ts = curr['time'].strftime('%Y-%m-%d %H:%M')
                 if not buy_sig  and raw_buy:
-                    blocked_logs.append({'Timeframe': tf, 'Type': f'BUY BLOCKED ({b_lbl})', 'Entry Time': ts, 'Entry Price': curr['close'], 'Reason': f'REJECTED ({bot_state["filter_mode"]})'})
+                    blocked_logs.append({'Timeframe': tf, 'Type': f'BUY BLOCKED ({b_lbl})', 'Entry Time': ts, 'Entry Price': curr['close'], 'Reason': f'REJECTED ({bot_state["filter_mode"]} + MA GAP)'})
                 if not sell_sig and raw_sell:
-                    blocked_logs.append({'Timeframe': tf, 'Type': f'SELL BLOCKED ({s_lbl})', 'Entry Time': ts, 'Entry Price': curr['close'], 'Reason': f'REJECTED ({bot_state["filter_mode"]})'})
+                    blocked_logs.append({'Timeframe': tf, 'Type': f'SELL BLOCKED ({s_lbl})', 'Entry Time': ts, 'Entry Price': curr['close'], 'Reason': f'REJECTED ({bot_state["filter_mode"]} + MA GAP)'})
                 if not (buy_sig or sell_sig) or i + 1 >= len(df): continue
                 next_c = df.loc[i + 1]; entry_t = next_c['time']; is_buy = bool(buy_sig)
                 sig_bar = next_c.copy(); sig_bar['atr'] = curr['atr']
@@ -1034,7 +1053,7 @@ def _style_sheet(ws) -> None:
         ws.column_dimensions[col[0].column_letter].width = min(max_len + 3, 28)
 
 # ─────────────────────────────────────────────────────────────
-# LIVE MONITORS (SMART CACHE ENGINE)
+# LIVE MONITORS
 # ─────────────────────────────────────────────────────────────
 async def position_monitor() -> None:
     while True:
@@ -1069,7 +1088,6 @@ async def timeframe_scanner(tf: str) -> None:
                 bot_state['market_data'][tf] = 'DD PAUSED'
                 await asyncio.sleep(30); continue
 
-            # ── 1. محرك الذاكرة: مرحلة الإحماء الأولي (Warm-up) عبر Deriv ──
             if bot_state['cache'][tf].empty:
                 await send_tg_msg(
                     f"⏳ <b>[نظام الذاكرة Deriv]</b>\n"
@@ -1095,7 +1113,6 @@ async def timeframe_scanner(tf: str) -> None:
                     await send_tg_msg(f"❌ <b>[نظام الذاكرة Deriv]</b>\nخطأ أثناء إحماء <b>[{tf}]</b>:\n{e}\nسيعاود المحاولة...")
                     await asyncio.sleep(15); continue
 
-            # ── 2. محرك الذاكرة: مرحلة التحديث النبضي (Pulse Update) عبر Deriv ──
             try:
                 raw_new = await fetch_deriv_candles(tf, count=10)
                 if not raw_new:
@@ -1212,7 +1229,7 @@ async def process_tg_update(update: dict) -> None:
 
         if msg == '/start':
             await send_tg_msg(
-                '<b>Gold Scalper Bot v4.5 (Deriv WS)</b>\n'
+                '<b>Gold Scalper Bot v4.6 (MA Gap Filter Edition)</b>\n'
                 'Strategies: STOCH-NEW | STOCH-OLD\n'
                 'Data Engine: Deriv WebSockets (1089)\n'
                 'Daily DD protection: 3%',
@@ -1282,10 +1299,12 @@ async def process_tg_update(update: dict) -> None:
                 curr = df.iloc[-2]
                 now  = datetime.now(timezone.utc)
                 blocked = bot_state['use_danger_filter'] and is_blocked_time(now)
+                gap_val = abs(curr['ema50'] - curr['ema150'])
                 await send_tg_msg(
                     f'<b>Debug [5m] - Deriv Data</b>\n'
                     f'K:{curr["K"]:.2f} D:{curr["D"]:.2f}\n'
                     f'EMA15:{curr["ema15"]:.2f} EMA50:{curr["ema50"]:.2f} EMA150:{curr["ema150"]:.2f}\n'
+                    f'MA Gap: {gap_val:.2f}\n'
                     f'ATR:{curr["atr"]:.2f}\n'
                     f'Time blocked now: {"YES" if blocked else "NO"}'
                 )
@@ -1320,6 +1339,7 @@ async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
     elif d == 'menu_main':     await edit_tg_msg(chat_id, msg_id, 'Main Menu:',     get_main_keyboard())
     elif d == 'menu_filters':  await edit_tg_msg(chat_id, msg_id, 'Filters:',       get_filters_keyboard())
     elif d == 'menu_stoch_settings': await edit_tg_msg(chat_id, msg_id, 'Stochastic:', get_stoch_settings_keyboard())
+    elif d == 'menu_ma_gap':   await edit_tg_msg(chat_id, msg_id, 'MA Gap Settings:', get_ma_gap_keyboard())
     elif d == 'menu_tfs':      await edit_tg_msg(chat_id, msg_id, 'Timeframes:',    get_tf_keyboard())
     elif d == 'menu_settings': await edit_tg_msg(chat_id, msg_id, 'Risk Settings:', get_settings_keyboard())
     elif d == 'menu_backtest':
@@ -1406,8 +1426,27 @@ async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
     elif d == 'toggle_stoch_deep': bot_state['use_stoch_deep'] = not bot_state['use_stoch_deep']; await edit_tg_msg(chat_id, msg_id, 'Filters:', get_filters_keyboard())
     elif d == 'toggle_stoch_mid':  bot_state['use_stoch_mid']  = not bot_state['use_stoch_mid'];  await edit_tg_msg(chat_id, msg_id, 'Filters:', get_filters_keyboard())
     elif d == 'toggle_stoch_shal': bot_state['use_stoch_shal'] = not bot_state['use_stoch_shal']; await edit_tg_msg(chat_id, msg_id, 'Filters:', get_filters_keyboard())
-    elif d == 'toggle_f_cons':     bot_state['use_f_cons']     = not bot_state['use_f_cons'];     await edit_tg_msg(chat_id, msg_id, 'Filters:', get_filters_keyboard())
     
+    # --- MA Gap Callbacks ---
+    elif d == 'toggle_ma_gap_fixed':
+        bot_state['use_ma_gap_fixed'] = not bot_state['use_ma_gap_fixed']
+        await edit_tg_msg(chat_id, msg_id, 'MA Gap Settings:', get_ma_gap_keyboard())
+    elif d == 'toggle_ma_gap_atr':
+        bot_state['use_ma_gap_atr'] = not bot_state['use_ma_gap_atr']
+        await edit_tg_msg(chat_id, msg_id, 'MA Gap Settings:', get_ma_gap_keyboard())
+    elif d == 'inc_gap_pips':
+        bot_state['ma_gap_pips'] += 1
+        await edit_tg_msg(chat_id, msg_id, 'MA Gap Settings:', get_ma_gap_keyboard())
+    elif d == 'dec_gap_pips':
+        bot_state['ma_gap_pips'] = max(1, bot_state['ma_gap_pips'] - 1)
+        await edit_tg_msg(chat_id, msg_id, 'MA Gap Settings:', get_ma_gap_keyboard())
+    elif d == 'inc_gap_atr':
+        bot_state['ma_gap_atr_mult'] = round(bot_state['ma_gap_atr_mult'] + 0.1, 1)
+        await edit_tg_msg(chat_id, msg_id, 'MA Gap Settings:', get_ma_gap_keyboard())
+    elif d == 'dec_gap_atr':
+        bot_state['ma_gap_atr_mult'] = max(0.1, round(bot_state['ma_gap_atr_mult'] - 0.1, 1))
+        await edit_tg_msg(chat_id, msg_id, 'MA Gap Settings:', get_ma_gap_keyboard())
+        
     elif d == 'toggle_danger':     bot_state['use_danger_filter'] = not bot_state['use_danger_filter']; await edit_tg_msg(chat_id, msg_id, 'Filters:', get_filters_keyboard())
 
     elif d == 'inc_stoch_k': bot_state['stoch_k'] = min(bot_state['stoch_k'] + 1, 100); await edit_tg_msg(chat_id, msg_id, 'Stochastic:', get_stoch_settings_keyboard())
@@ -1581,7 +1620,7 @@ async def handle_ping(request: web.Request) -> web.Response:
     dd     = 'TRIGGERED' if bot_state['dd_triggered'] else 'OK'
     return web.Response(
         text=(
-            f'Gold Scalper Bot v4.5\n'
+            f'Gold Scalper Bot v4.6\n'
             f'Data Engine: Deriv WebSockets\n'
             f'Uptime: {uptime}\nLive: {live}\n'
             f'Backtest: {bt}\nSOD: {sod}\nDD: {dd}'
