@@ -716,11 +716,24 @@ async def supervised(coro_fn, *args, label: str = '') -> None:
         except Exception as e: c_log(f'Task {label} crashed: {e}'); await asyncio.sleep(5)
 
 # ─────────────────────────────────────────────────────────────
-# ENTRY POINT
+# ENTRY POINT & DUMMY WEB SERVER (For Render)
 # ─────────────────────────────────────────────────────────────
+async def handle_ping(request):
+    return web.Response(text="Bot is running smoothly!")
+
 async def main() -> None:
     get_http()
     bot_state['last_poll_ok'] = datetime.now(timezone.utc).timestamp()
+    
+    # 🌐 تشغيل خادم ويب بسيط لإرضاء منصة Render
+    app = web.Application()
+    app.router.add_get('/', handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get('PORT', 10000))
+    await web.TCPSite(runner, '0.0.0.0', port).start()
+    c_log(f'Web server started on port {port}')
+
     tasks = [
         asyncio.create_task(supervised(telegram_polling_loop, label='tg_polling')),
         asyncio.create_task(supervised(telegram_watchdog,     label='tg_watchdog')),
@@ -732,3 +745,4 @@ async def main() -> None:
 
 if __name__ == '__main__':
     asyncio.run(main())
+
