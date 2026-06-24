@@ -1,4 +1,4 @@
-# Gold Scalper Bot — v5.4.2 (Gann Levels Engine - Fixed Pandas 3.0 Timezones)
+# Gold Scalper Bot — v5.5 (Gann Levels Engine - Clean Excel & Precise Stats)
 import asyncio
 import aiohttp
 import os
@@ -6,7 +6,8 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta, timezone
 from aiohttp import web
-from openpyxl.styles import PatternFill
+import openpyxl
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 
 # ─────────────────────────────────────────────────────────────
 # CONFIGURATION
@@ -55,19 +56,16 @@ bot_state: dict = {
     'timeframes':       _TFS,
     'active_tfs':       {tf: (True if tf in ['1m', '3m', '5m'] else False) for tf in _TFS},
     
-    # ── Gann Strategy ──
     'gann_zone_filter':      'star',
     'gann_entry_mode':       'touch', 
     'gann_touch_margin_pts': 5.0,     
     'gann_anti_spam':        True,    
     
-    # ── Protection & Filters ──
     'use_trend_filter':  False,
     'trend_filter_type': 'EMA_200',
     'use_be':            False,
     'be_pips':           20,
 
-    # Risk
     'lot_size':         0.05,
     'pip_value':        0.1,
     'spread_pips':      2.2,
@@ -83,7 +81,7 @@ bot_state: dict = {
 bot_state['sl_pips']['1m'] = 50
 
 # ─────────────────────────────────────────────────────────────
-# TIME UTILS (FIXED FOR PANDAS 3.0 MONOTONIC TIMEZONES)
+# TIME UTILS (FIXED FOR PANDAS 3.0)
 # ─────────────────────────────────────────────────────────────
 _BLOCKED_DAMASCUS_HOURS = {13, 18, 21, 22}
 
@@ -380,7 +378,7 @@ def get_backtest_keyboard() -> dict:
     ]}
 
 # ─────────────────────────────────────────────────────────────
-# COLORED BACKTEST ENGINE (V5.4.2 FIXED ALL TIMEZONES)
+# COLORED BACKTEST ENGINE (V5.5 CLEAN REPORT & STATS)
 # ─────────────────────────────────────────────────────────────
 async def run_gann_backtest_dates(start_dt: datetime, end_dt: datetime) -> None:
     global _bt_progress
@@ -405,7 +403,6 @@ async def run_gann_backtest_dates(start_dt: datetime, end_dt: datetime) -> None:
         await prog.set_phase('حساب المؤشرات وفلاتر الاتجاه...')
         df_1m = pd.DataFrame(candles_1m).set_index('time')
         
-        # تنظيف وتأمين الفهرس الزمني ليكون Monotonic صريحاً بتوقيت UTC
         df_1m = df_1m[~df_1m.index.duplicated(keep='first')].sort_index()
         df_1m.index = df_1m.index.tz_convert('UTC')
         
@@ -420,18 +417,13 @@ async def run_gann_backtest_dates(start_dt: datetime, end_dt: datetime) -> None:
         df_h1['EMA_50']  = df_h1['close'].ewm(span=50, adjust=False).mean()
         df_h1['EMA_150'] = df_h1['close'].ewm(span=150, adjust=False).mean()
         
-        # الفكس القاتل لتعارض التوقيت: تحويل السورس والتارجت لـ UTC بالكامل قبل الـ reindex
         df_1m['EMA_200'] = df_h1['EMA_200'].reindex(df_1m.index, method='ffill')
         df_1m['EMA_50']  = df_h1['EMA_50'].reindex(df_1m.index, method='ffill')
         df_1m['EMA_150'] = df_h1['EMA_150'].reindex(df_1m.index, method='ffill')
 
         trade_logs = []
         cycles_log = []
-        cycle_colors = ['#FFB3BA', '#FFDFBA', '#FFFFBA', '#BAFFC9', '#BAE1FF', '#E8BAFF', '#FFBAE1', '#E0E0E0', '#D5AAFF', '#B5EAD7']
-        color_index = 0
-        cycle_color_map = {}
 
-        # التأكد من جعل البداية والنهاية متوافقتين زمنياً بشكل صارم مع نوع الفهرس
         start_ts = pd.Timestamp(start_dt).tz_convert('UTC') if start_dt.tzinfo else pd.Timestamp(start_dt).tz_localize('UTC')
         end_ts = pd.Timestamp(end_dt).tz_convert('UTC') if end_dt.tzinfo else pd.Timestamp(end_dt).tz_localize('UTC')
         
@@ -439,18 +431,14 @@ async def run_gann_backtest_dates(start_dt: datetime, end_dt: datetime) -> None:
         await prog.set_tf('H1 Cycles', len(cycle_starts))
         
         pv = bot_state['pip_value']; lot = bot_state['lot_size']; margin_pts = bot_state['gann_touch_margin_pts']
-        res = {'win': 0, 'loss': 0, 'be': 0, 'total_prof': 0.0, 'peak_equity': 0.0, 'max_dd': 0.0}
+        res = {'win': 0, 'loss': 0, 'be': 0, 'total_prof': 0.0, 'peak_equity': 0.0, 'max_dd': 0.0, 'win_usd': 0.0, 'loss_usd': 0.0}
 
         for cycle_n, cycle_start in enumerate(cycle_starts):
             if prog.cancelled: break
             await asyncio.sleep(0)
             
-            # تثبيت توقيت البدء للدورة كمؤشر مقارنة نقي
             c_start_ts = pd.Timestamp(cycle_start).tz_convert('UTC')
-            cycle_color = cycle_colors[color_index % len(cycle_colors)]
             cycle_dam_str = _utc_to_dam(c_start_ts).strftime('%Y-%m-%d %H:00')
-            cycle_color_map[cycle_dam_str] = cycle_color
-            color_index += 1
             
             trades_in_this_cycle = 0
             level_used_this_cycle: set[str] = set()
@@ -531,24 +519,31 @@ async def run_gann_backtest_dates(start_dt: datetime, end_dt: datetime) -> None:
                         if outcome == 'OPEN': continue
                         
                         trades_in_this_cycle += 1
-                        if outcome == 'WIN': res['win'] += 1
-                        elif outcome == 'LOSS': res['loss'] += 1
-                        elif outcome == 'BREAK-EVEN': res['be'] += 1
+                        if outcome == 'WIN': 
+                            res['win'] += 1; res['win_usd'] += p_usd
+                        elif outcome == 'LOSS': 
+                            res['loss'] += 1; res['loss_usd'] += abs(p_usd)
+                        elif outcome == 'BREAK-EVEN': 
+                            res['be'] += 1
                         
                         res['total_prof'] += p_usd
                         res['peak_equity'] = max(res['peak_equity'], res['total_prof'])
                         res['max_dd'] = max(res['max_dd'], res['peak_equity'] - res['total_prof'])
 
                         trade_logs.append({
+                            'cycle_ts': c_start_ts.timestamp(),
                             'دورة H1 (DAM)': cycle_dam_str,
+                            'إغلاق H1': h1_close,
                             'وقت الصفقة (DAM)': _utc_to_dam(bar_t).strftime('%Y-%m-%d %H:%M'),
                             'TF': tf,
-                            'اتجاه': f"{sig['type']}",
-                            'إغلاق H1': h1_close,
-                            'المستوى': sig['lvl'],
-                            'TP (نقطة)': tp_pts_user, 'SL (نقطة)': sl_pts_user,
+                            'اتجاه': 'BUY 📈' if is_buy else 'SELL 📉',
+                            'المستوى (الدخول)': entry_px,
+                            'قوي ⭐': '⭐',
+                            'الهدف (TP)': tp_px,
+                            'الوقف (SL)': sl_px,
                             'النتيجة': outcome,
-                            'ربح ($)': p_usd
+                            'ربح ($)': p_usd,
+                            'رصيد تراكمي ($)': round(res['total_prof'], 2)
                         })
                         
             cycles_log.append({
@@ -558,36 +553,112 @@ async def run_gann_backtest_dates(start_dt: datetime, end_dt: datetime) -> None:
             })
             await prog.tick(cycle_n + 1, res['win'], res['loss'], res['be'], res['total_prof'])
 
-        await prog.set_phase('إنشاء ملف Excel الملون...')
+        await prog.set_phase('إنشاء ملف Excel...')
         fname = f"GannBT_{datetime.now(timezone.utc).strftime('%H%M%S')}.xlsx"
         
-        df_trades = pd.DataFrame(trade_logs)
-        if not df_trades.empty:
+        # ── بناء ملف الإكسل باحترافية وتلوين حسب النتيجة ──
+        wb = openpyxl.Workbook()
+        ws_trades = wb.active
+        ws_trades.title = 'الصفقات'
+        ws_trades.sheet_view.rightToLeft = True
+
+        fill_win = PatternFill(start_color='C6EFCE', end_color='C6EFCE', fill_type='solid')
+        fill_loss = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
+        fill_header = PatternFill(start_color='D3D3D3', end_color='D3D3D3', fill_type='solid')
+        font_header = Font(bold=True, size=12)
+        font_cycle = Font(bold=True, size=14, color="000000")
+        align_center = Alignment(horizontal='center', vertical='center')
+        thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+
+        headers = ['وقت الصفقة (DAM)', 'TF', 'اتجاه', 'المستوى (الدخول)', 'قوي ⭐', 'الهدف (TP)', 'الوقف (SL)', 'النتيجة', 'ربح ($)', 'رصيد تراكمي ($)']
+        ws_trades.append(headers)
+        for col in range(1, len(headers) + 1):
+            cell = ws_trades.cell(row=1, column=col)
+            cell.font = font_header
+            cell.alignment = align_center
+            cell.fill = fill_header
+            cell.border = thin_border
+
+        if trade_logs:
+            df_trades = pd.DataFrame(trade_logs)
             df_trades['TF_Sort'] = df_trades['TF'].apply(lambda x: int(x.replace('m','')) if 'm' in x else int(x.replace('h',''))*60)
-            df_trades = df_trades.sort_values(by=['TF_Sort', 'دورة H1 (DAM)']).drop(columns=['TF_Sort'])
-
-        with pd.ExcelWriter(fname, engine='openpyxl') as writer:
-            df_trades.to_excel(writer, sheet_name='الصفقات', index=False)
-            pd.DataFrame(cycles_log).to_excel(writer, sheet_name='دورات H1', index=False)
+            df_trades = df_trades.sort_values(by=['cycle_ts', 'TF_Sort'])
             
-            if not df_trades.empty:
-                ws_trades = writer.sheets['الصفقات']
-                cycle_col_idx = list(df_trades.columns).index('دورة H1 (DAM)') + 1
-                for row in ws_trades.iter_rows(min_row=2):
-                    c_val = row[cycle_col_idx-1].value
-                    if c_val in cycle_color_map:
-                        fill = PatternFill(start_color=cycle_color_map[c_val].replace('#',''), fill_type='solid')
-                        for cell in row: cell.fill = fill
-                        
-            ws_cycles = writer.sheets['دورات H1']
-            for row in ws_cycles.iter_rows(min_row=2):
-                c_val = row[0].value
-                if c_val in cycle_color_map:
-                    fill = PatternFill(start_color=cycle_color_map[c_val].replace('#',''), fill_type='solid')
-                    for cell in row: cell.fill = fill
+            current_cycle = None
+            for _, row in df_trades.iterrows():
+                if row['دورة H1 (DAM)'] != current_cycle:
+                    current_cycle = row['دورة H1 (DAM)']
+                    cycle_text = f"دورة H1: {current_cycle}  |  إغلاق H1: {row['إغلاق H1']}"
+                    ws_trades.append([cycle_text] + [''] * (len(headers) - 1))
+                    merge_row = ws_trades.max_row
+                    ws_trades.merge_cells(start_row=merge_row, start_column=1, end_row=merge_row, end_column=len(headers))
+                    
+                    cell = ws_trades.cell(row=merge_row, column=1)
+                    cell.font = font_cycle
+                    cell.alignment = align_center
+                    cell.fill = PatternFill(start_color='E2E3E5', fill_type='solid')
+                    
+                    for col in range(1, len(headers) + 1):
+                        ws_trades.cell(row=merge_row, column=col).border = thin_border
 
-        await prog.done(f'باكتيست اكتمل ✅\nالربح: ${res["total_prof"]}')
-        await send_tg_document(fname, 'نتائج الباكتيست (مفرز وملون)')
+                trade_row = [
+                    row['وقت الصفقة (DAM)'], row['TF'], row['اتجاه'],
+                    row['المستوى (الدخول)'], row['قوي ⭐'], row['الهدف (TP)'], row['الوقف (SL)'],
+                    row['النتيجة'], row['ربح ($)'], row['رصيد تراكمي ($)']
+                ]
+                ws_trades.append(trade_row)
+                current_row = ws_trades.max_row
+                
+                fill_color = fill_win if row['النتيجة'] == 'WIN' else (fill_loss if row['النتيجة'] == 'LOSS' else None)
+                
+                for col in range(1, len(headers) + 1):
+                    cell = ws_trades.cell(row=current_row, column=col)
+                    cell.alignment = Alignment(horizontal='center')
+                    if fill_color:
+                        cell.fill = fill_color
+
+        for column_cells in ws_trades.columns:
+            ws_trades.column_dimensions[column_cells[0].column_letter].width = 16
+
+        ws_cycles = wb.create_sheet('دورات H1')
+        ws_cycles.sheet_view.rightToLeft = True
+        df_cycles = pd.DataFrame(cycles_log)
+        if not df_cycles.empty:
+            from openpyxl.utils.dataframe import dataframe_to_rows
+            for r_idx, row in enumerate(dataframe_to_rows(df_cycles, index=False, header=True), 1):
+                for c_idx, value in enumerate(row, 1):
+                    cell = ws_cycles.cell(row=r_idx, column=c_idx, value=value)
+                    if r_idx == 1:
+                        cell.font = font_header
+                        cell.fill = fill_header
+                    cell.alignment = align_center
+            for column_cells in ws_cycles.columns:
+                ws_cycles.column_dimensions[column_cells[0].column_letter].width = 22
+
+        wb.save(fname)
+
+        # ── تشكيل رسالة التيليجرام الجديدة ──
+        total_trades = res['win'] + res['loss'] + res['be']
+        wr = round(res['win'] / max(1, res['win']+res['loss']) * 100, 1) if (res['win']+res['loss']) > 0 else 0
+        dd_pct = round(res['max_dd'] / max(1, res['peak_equity']) * 100, 1) if res['peak_equity'] > 0 else 0
+        
+        tg_lines = [
+            f'<b>باكتيست جان اكتمل ✅</b>',
+            f'جان H1→[{"+".join(enabled_tfs)}] | {bot_state["gann_entry_mode"]} | {"⭐" if bot_state["gann_zone_filter"]=="star" else "الكل"}',
+            f'{_fmt_dam(start_dt).split()[0]} → {_fmt_dam(end_dt).split()[0]}',
+            '',
+            f'Net: PROFIT <b>{"▲" if res["total_prof"]>=0 else "▼"} ${round(res["total_prof"], 2)}</b>',
+            f'Win:  +${round(res["win_usd"], 2)} ({res["win"]})',
+            f'Loss: -${round(res["loss_usd"], 2)} ({res["loss"]})',
+            f'WR: {wr}% ({total_trades} صفقة)',
+            f'Max DD: ${round(res["max_dd"], 2)} ({dd_pct}%)',
+            f'دورات H1: {len(cycle_starts)}  |  TP/SL: نقاط ثابتة | Lot: {bot_state["lot_size"]}  |  cs=100',
+            '',
+            'إرسال ملف Excel...'
+        ]
+        
+        await prog.done('\n'.join(tg_lines))
+        await send_tg_document(fname, 'نتائج الباكتيست')
         try: os.remove(fname)
         except: pass
         bot_state['is_backtesting'] = False
@@ -611,7 +682,7 @@ async def process_tg_update(update: dict) -> None:
             return
 
         if msg == '/start':
-            await send_tg_msg('<b>Gold Scalper Bot v5.4.2</b>', get_main_keyboard())
+            await send_tg_msg('<b>Gold Scalper Bot v5.5</b>', get_main_keyboard())
 
         elif msg.lower().startswith('/set'):
             parts = msg.strip().lower().split()
@@ -759,7 +830,7 @@ async def main() -> None:
         asyncio.create_task(supervised(telegram_polling_loop, label='tg_polling')),
         asyncio.create_task(supervised(telegram_watchdog,     label='tg_watchdog')),
     ]
-    c_log('Gold Scalper Bot v5.4.2 Advanced started.')
+    c_log('Gold Scalper Bot v5.5 Advanced started.')
     try: await asyncio.gather(*tasks)
     finally:
         if _http and not _http.closed: await _http.close()
