@@ -1,4 +1,4 @@
-# Gold Scalper Bot — v5.4.1 (Gann Levels Engine - Advanced Filters & Render Support)
+# Gold Scalper Bot — v5.4.2 (Gann Levels Engine - Fixed Pandas 3.0 Timezones)
 import asyncio
 import aiohttp
 import os
@@ -83,7 +83,7 @@ bot_state: dict = {
 bot_state['sl_pips']['1m'] = 50
 
 # ─────────────────────────────────────────────────────────────
-# TIME UTILS
+# TIME UTILS (FIXED FOR PANDAS 3.0 MONOTONIC TIMEZONES)
 # ─────────────────────────────────────────────────────────────
 _BLOCKED_DAMASCUS_HOURS = {13, 18, 21, 22}
 
@@ -91,11 +91,13 @@ def is_blocked_time(dt_utc: datetime) -> bool:
     return (dt_utc.hour + 3) % 24 in _BLOCKED_DAMASCUS_HOURS
 
 def _to_utc(x) -> pd.Timestamp:
-    if isinstance(x, pd.Timestamp): return x.tz_convert('UTC') if x.tzinfo else x.tz_localize('UTC')
+    if isinstance(x, pd.Timestamp):
+        return x.tz_convert('UTC') if x.tzinfo else x.tz_localize('UTC')
     if isinstance(x, datetime):
-        if x.tzinfo: return pd.Timestamp(x.astimezone(timezone.utc)).tz_localize('UTC')
+        if x.tzinfo: return pd.Timestamp(x).tz_convert('UTC')
         return pd.Timestamp(x).tz_localize('UTC')
-    if isinstance(x, (int, float)): return pd.Timestamp(int(x), unit='s').tz_localize('UTC')
+    if isinstance(x, (int, float)):
+        return pd.Timestamp(int(x), unit='s').tz_localize('UTC')
     ts = pd.Timestamp(str(x))
     return ts.tz_convert('UTC') if ts.tzinfo else ts.tz_localize('UTC')
 
@@ -378,7 +380,7 @@ def get_backtest_keyboard() -> dict:
     ]}
 
 # ─────────────────────────────────────────────────────────────
-# COLORED BACKTEST ENGINE (WITH ERROR HANDLING & PANDAS FIXES)
+# COLORED BACKTEST ENGINE (V5.4.2 FIXED ALL TIMEZONES)
 # ─────────────────────────────────────────────────────────────
 async def run_gann_backtest_dates(start_dt: datetime, end_dt: datetime) -> None:
     global _bt_progress
@@ -403,12 +405,13 @@ async def run_gann_backtest_dates(start_dt: datetime, end_dt: datetime) -> None:
         await prog.set_phase('حساب المؤشرات وفلاتر الاتجاه...')
         df_1m = pd.DataFrame(candles_1m).set_index('time')
         
-        # FIX 1: منع التكرار وإجبار الترتيب الزمني لتفادي انهيار الباكتيست (Pandas ffill Index Error)
+        # تنظيف وتأمين الفهرس الزمني ليكون Monotonic صريحاً بتوقيت UTC
         df_1m = df_1m[~df_1m.index.duplicated(keep='first')].sort_index()
+        df_1m.index = df_1m.index.tz_convert('UTC')
         
         df_h1 = df_1m.resample('1h', closed='right', label='right').agg({'close': 'last'}).dropna()
+        df_h1.index = df_h1.index.tz_convert('UTC')
         
-        # FIX 2: إذا لم يكن هناك بيانات كافية لفريم الساعة، أوقف الباكتيست بدلاً من الانهيار
         if df_h1.empty:
             await prog.done('❌ لا يوجد بيانات كافية لفريم H1 ضمن التاريخ المحدد.')
             bot_state['is_backtesting'] = False; return
@@ -417,6 +420,7 @@ async def run_gann_backtest_dates(start_dt: datetime, end_dt: datetime) -> None:
         df_h1['EMA_50']  = df_h1['close'].ewm(span=50, adjust=False).mean()
         df_h1['EMA_150'] = df_h1['close'].ewm(span=150, adjust=False).mean()
         
+        # الفكس القاتل لتعارض التوقيت: تحويل السورس والتارجت لـ UTC بالكامل قبل الـ reindex
         df_1m['EMA_200'] = df_h1['EMA_200'].reindex(df_1m.index, method='ffill')
         df_1m['EMA_50']  = df_h1['EMA_50'].reindex(df_1m.index, method='ffill')
         df_1m['EMA_150'] = df_h1['EMA_150'].reindex(df_1m.index, method='ffill')
@@ -427,8 +431,11 @@ async def run_gann_backtest_dates(start_dt: datetime, end_dt: datetime) -> None:
         color_index = 0
         cycle_color_map = {}
 
-        start_ts = _to_ts(start_dt)
-        cycle_starts = df_h1[(df_h1.index >= start_ts) & (df_h1.index < _to_ts(end_dt))].index
+        # التأكد من جعل البداية والنهاية متوافقتين زمنياً بشكل صارم مع نوع الفهرس
+        start_ts = pd.Timestamp(start_dt).tz_convert('UTC') if start_dt.tzinfo else pd.Timestamp(start_dt).tz_localize('UTC')
+        end_ts = pd.Timestamp(end_dt).tz_convert('UTC') if end_dt.tzinfo else pd.Timestamp(end_dt).tz_localize('UTC')
+        
+        cycle_starts = df_h1[(df_h1.index >= start_ts) & (df_h1.index < end_ts)].index
         await prog.set_tf('H1 Cycles', len(cycle_starts))
         
         pv = bot_state['pip_value']; lot = bot_state['lot_size']; margin_pts = bot_state['gann_touch_margin_pts']
@@ -438,8 +445,10 @@ async def run_gann_backtest_dates(start_dt: datetime, end_dt: datetime) -> None:
             if prog.cancelled: break
             await asyncio.sleep(0)
             
+            # تثبيت توقيت البدء للدورة كمؤشر مقارنة نقي
+            c_start_ts = pd.Timestamp(cycle_start).tz_convert('UTC')
             cycle_color = cycle_colors[color_index % len(cycle_colors)]
-            cycle_dam_str = _utc_to_dam(cycle_start).strftime('%Y-%m-%d %H:00')
+            cycle_dam_str = _utc_to_dam(c_start_ts).strftime('%Y-%m-%d %H:00')
             cycle_color_map[cycle_dam_str] = cycle_color
             color_index += 1
             
@@ -450,7 +459,7 @@ async def run_gann_backtest_dates(start_dt: datetime, end_dt: datetime) -> None:
             
             if bot_state['use_trend_filter']:
                 try:
-                    cycle_row = df_1m.loc[df_1m.index <= cycle_start].iloc[-1]
+                    cycle_row = df_1m.loc[df_1m.index <= c_start_ts].iloc[-1]
                     if bot_state['trend_filter_type'] == 'EMA_200':
                         if cycle_row['close'] > cycle_row['EMA_200']: trend_allows_sell = False
                         else: trend_allows_buy = False
@@ -459,13 +468,13 @@ async def run_gann_backtest_dates(start_dt: datetime, end_dt: datetime) -> None:
                         else: trend_allows_buy = False
                 except: pass
 
-            cycle_end = cycle_start + timedelta(hours=1)
-            h1_close = df_h1.loc[cycle_start, 'close']
+            cycle_end = c_start_ts + timedelta(hours=1)
+            h1_close = df_h1.loc[c_start_ts, 'close']
             
             buy_strong  = determine_strong_gann_levels(calculate_gann_levels_from_close(h1_close, True), h1_close, True)
             sell_strong = determine_strong_gann_levels(calculate_gann_levels_from_close(h1_close, False), h1_close, False)
 
-            df_cycle = df_1m[(df_1m.index > cycle_start) & (df_1m.index <= cycle_end)]
+            df_cycle = df_1m[(df_1m.index > c_start_ts) & (df_1m.index <= cycle_end)]
             if df_cycle.empty: continue
 
             for tf in enabled_tfs:
@@ -584,7 +593,6 @@ async def run_gann_backtest_dates(start_dt: datetime, end_dt: datetime) -> None:
         bot_state['is_backtesting'] = False
 
     except Exception as e:
-        # FIX 3: منع التعليق الصامت، وعرض الخطأ في تيليجرام لإيقاف المهمة بأمان
         err_msg = f'❌ حدث خطأ برمجي: {repr(e)}'
         c_log(err_msg)
         await prog.done(err_msg)
@@ -603,7 +611,7 @@ async def process_tg_update(update: dict) -> None:
             return
 
         if msg == '/start':
-            await send_tg_msg('<b>Gold Scalper Bot v5.4.1</b>', get_main_keyboard())
+            await send_tg_msg('<b>Gold Scalper Bot v5.4.2</b>', get_main_keyboard())
 
         elif msg.lower().startswith('/set'):
             parts = msg.strip().lower().split()
@@ -739,7 +747,6 @@ async def main() -> None:
     get_http()
     bot_state['last_poll_ok'] = datetime.now(timezone.utc).timestamp()
     
-    # 🌐 تشغيل خادم ويب وهمي لإرضاء منصة Render ومنع خطأ Ports
     app = web.Application()
     app.router.add_get('/', handle_ping)
     runner = web.AppRunner(app)
@@ -752,7 +759,7 @@ async def main() -> None:
         asyncio.create_task(supervised(telegram_polling_loop, label='tg_polling')),
         asyncio.create_task(supervised(telegram_watchdog,     label='tg_watchdog')),
     ]
-    c_log('Gold Scalper Bot v5.4.1 Advanced started.')
+    c_log('Gold Scalper Bot v5.4.2 Advanced started.')
     try: await asyncio.gather(*tasks)
     finally:
         if _http and not _http.closed: await _http.close()
