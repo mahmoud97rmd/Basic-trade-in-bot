@@ -1,4 +1,4 @@
-# Gold Scalper Bot — v6.0 (Universal Gann Engine - Multi-Market)
+# Gold Scalper Bot — v6.1 (Universal Gann Engine + Full Strategy/Risk Restored)
 import asyncio
 import aiohttp
 import os
@@ -54,15 +54,22 @@ bot_state: dict = {
     'timeframes':       _TFS,
     'active_tfs':       {tf: (True if tf in ['1m', '3m', '5m'] else False) for tf in _TFS},
     
+    # ── Gann Strategy (Restored) ──
     'gann_zone_filter':      'star',
     'gann_entry_mode':       'touch', 
     'gann_touch_margin_pts': 5.0,     
     'gann_anti_spam':        True,    
     
+    # ── Protection & Filters ──
     'use_trend_filter':  False,
     'trend_filter_type': 'EMA_200',
+    
+    # ── Risk & Trailing (Restored) ──
     'use_be':            False,
     'be_pips':           20,
+    'use_trailing':      False,
+    'trail_points':      50,
+    'trail_offset':      50,
 
     'lot_size':         0.05,
     'tp_pips': {tf: 180 for tf in _TFS},
@@ -158,11 +165,11 @@ async def fetch_oanda_candles(granularity_str: str, count: int = 5000, end_time:
 # UNIVERSAL GANN MATH (OTC APP ENGINE)
 # ─────────────────────────────────────────────────────────────
 def get_gann_factor(price: float) -> float:
-    if price < 10: return 100000.0     # Forex e.g. 1.08500 -> 108500
-    if price < 100: return 1000.0      # Indices/Metals e.g. 25.50 -> 25500
-    if price < 1000: return 100.0      # JPY pairs e.g. 150.50 -> 15050
-    if price < 10000: return 10.0      # Gold e.g. 2300.5 -> 23005
-    if price < 100000: return 1.0      # BTC e.g. 65000 -> 65000
+    if price < 10: return 100000.0     
+    if price < 100: return 1000.0      
+    if price < 1000: return 100.0      
+    if price < 10000: return 10.0      
+    if price < 100000: return 1.0      
     return 0.1
 
 def calculate_gann_levels_from_close(price: float, is_buy: bool) -> list:
@@ -171,7 +178,7 @@ def calculate_gann_levels_from_close(price: float, is_buy: bool) -> list:
     try:
         sqrt_P = np.sqrt(P)
         levels = []
-        for i in range(1, 17):  # 16 Levels (45° increments for 2 cycles)
+        for i in range(1, 17):
             ratio = i * 0.125
             lvl = ((sqrt_P + ratio) ** 2) / f if is_buy else ((sqrt_P - ratio) ** 2) / f
             levels.append(round(lvl, 5))
@@ -183,7 +190,6 @@ def determine_strong_gann_levels(price: float, is_buy: bool) -> list:
     P = price * f
     try:
         sqrt_P = np.sqrt(P)
-        # الزوايا القوية: 90, 180, 270, 360, 450, 540, 630, 720
         strong_ratios = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
         strong = []
         for ratio in strong_ratios:
@@ -315,26 +321,31 @@ async def send_tg_document(file_path: str, caption: str) -> None:
     except Exception: pass
 
 # ─────────────────────────────────────────────────────────────
-# KEYBOARDS
+# KEYBOARDS (RESTORED ENTRY, MARGIN, TRAILING)
 # ─────────────────────────────────────────────────────────────
 def get_main_keyboard() -> dict:
     st = '▶ يعمل' if bot_state['status'] == 'RUNNING' else '⏸ متوقف'
     bt = '⏳ فحص...' if bot_state['is_backtesting'] else '📊 باكتيست'
     return {'inline_keyboard': [
         [{'text': f'البوت: {st}', 'callback_data': 'toggle_status'}],
-        [{'text': '⚙️ الاستراتيجية (فلاتر و Anti-Spam)', 'callback_data': 'menu_strategy'}],
-        [{'text': '💰 المخاطر (تعديل الأهداف و BE)', 'callback_data': 'menu_risk'}],
+        [{'text': '⚙️ الاستراتيجية (جان وفلاتر)', 'callback_data': 'menu_strategy'}],
+        [{'text': '💰 المخاطر (التتبع والأهداف)', 'callback_data': 'menu_risk'}],
         [{'text': '⏱ الفريمات النشطة', 'callback_data': 'menu_tfs'}],
         [{'text': bt, 'callback_data': 'menu_backtest'}, {'text': '❌ إخفاء', 'callback_data': 'hide_keyboard'}],
     ]}
 
 def get_strategy_keyboard() -> dict:
+    zf = 'كل المستويات' if bot_state['gann_zone_filter'] == 'all' else 'القوية فقط ⭐'
+    em = 'ملامسة (Touch)' if bot_state['gann_entry_mode'] == 'touch' else 'اختراق وإعادة اختبار'
     spam_i = '✅' if bot_state['gann_anti_spam'] else '⬜'
     trnd_i = '✅' if bot_state['use_trend_filter'] else '⬜'
     t_type = '200 EMA' if bot_state['trend_filter_type'] == 'EMA_200' else '50/150 Cross'
     
     return {'inline_keyboard': [
         [{'text': '── 📐 مستويات جان ──', 'callback_data': 'noop'}],
+        [{'text': f'الفلترة: {zf} ↻', 'callback_data': 'cycle_zone_filter'}],
+        [{'text': f'الدخول: {em} ↻', 'callback_data': 'cycle_entry_mode'}],
+        [{'text': '−H', 'callback_data': 'dec_margin'}, {'text': f'هامش الملامسة = {bot_state["gann_touch_margin_pts"]}p', 'callback_data': 'noop'}, {'text': '+H', 'callback_data': 'inc_margin'}],
         [{'text': f'Anti-Spam (منع التكرار): {spam_i}', 'callback_data': 'toggle_spam'}],
         [{'text': '🛡️ ── حماية الاتجاه ── 🛡️', 'callback_data': 'noop'}],
         [{'text': f'الفلتر مفعل: {trnd_i}', 'callback_data': 'toggle_trend'}],
@@ -345,10 +356,14 @@ def get_strategy_keyboard() -> dict:
 def get_risk_keyboard() -> dict:
     be_i  = '✅' if bot_state['use_be'] else '⬜'
     be_p  = bot_state['be_pips']
+    trl_i = '✅' if bot_state['use_trailing'] else '⬜'
+    trl_p = bot_state['trail_points']
+    
     return {'inline_keyboard': [
+        [{'text': f'Trailing (تزحيل الحجز): {trl_i}', 'callback_data': 'toggle_trail'}],
+        [{'text': '-10', 'callback_data': 'dec_trail'}, {'text': f'Trail Pts: {trl_p}p', 'callback_data': 'noop'}, {'text': '+10', 'callback_data': 'inc_trail'}],
         [{'text': f'حماية الأرباح (Break-Even): {be_i}', 'callback_data': 'toggle_be'}],
         [{'text': f'نقاط الحماية: {be_p}p', 'callback_data': 'noop'}],
-        [{'text': '/set be 30 (أرسلها كرسالة لتغيير النقاط)', 'callback_data': 'noop'}],
         [{'text': '📋 تعديل TP/SL للفريمات', 'callback_data': 'view_tpsl'}],
         [{'text': '← رجوع', 'callback_data': 'menu_main'}],
     ]}
@@ -384,7 +399,7 @@ def get_backtest_keyboard() -> dict:
     ]}
 
 # ─────────────────────────────────────────────────────────────
-# COLORED BACKTEST ENGINE (V6.0 UNIVERSAL MARKET & CLEAN EXCEL)
+# COLORED BACKTEST ENGINE (V6.1 RESTORED ENTRY + TRAILING LOGIC)
 # ─────────────────────────────────────────────────────────────
 async def run_gann_backtest_dates(start_dt: datetime, end_dt: datetime) -> None:
     global _bt_progress
@@ -419,7 +434,6 @@ async def run_gann_backtest_dates(start_dt: datetime, end_dt: datetime) -> None:
             await prog.done('❌ لا يوجد بيانات كافية لفريم H1 ضمن التاريخ المحدد.')
             bot_state['is_backtesting'] = False; return
 
-        # ── الاكتشاف التلقائي لقيمة النقطة (Universal Pip Value) ──
         sample_price = df_h1['close'].iloc[0]
         if sample_price < 10: pv = 0.0001
         elif sample_price < 1000: pv = 0.01
@@ -490,15 +504,26 @@ async def run_gann_backtest_dates(start_dt: datetime, end_dt: datetime) -> None:
                     h = float(df_tf.iloc[tf_idx]['high']); l = float(df_tf.iloc[tf_idx]['low'])
                     
                     signals = []
+                    # استعادة منطق الدخول (Touch vs Breakout)
                     for lvl in buy_list:
                         combo_key = f"{lvl}_{tf}"
                         if bot_state['gann_anti_spam'] and combo_key in level_used_this_cycle: continue
-                        if l <= lvl + (margin_pts * pv) and h >= lvl: signals.append({'type': 'BUY', 'lvl': lvl, 'combo': combo_key})
+                        if bot_state['gann_entry_mode'] == 'touch':
+                            if l <= lvl + (margin_pts * pv) and h >= lvl: signals.append({'type': 'BUY', 'lvl': lvl, 'combo': combo_key})
+                        else:
+                            if tf_idx > 0:
+                                prev_c = float(df_tf.iloc[tf_idx-1]['close'])
+                                if prev_c < lvl and h >= lvl + (2.0 * pv): signals.append({'type': 'BUY', 'lvl': lvl, 'combo': combo_key})
 
                     for lvl in sell_list:
                         combo_key = f"{lvl}_{tf}"
                         if bot_state['gann_anti_spam'] and combo_key in level_used_this_cycle: continue
-                        if h >= lvl - (margin_pts * pv) and l <= lvl: signals.append({'type': 'SELL', 'lvl': lvl, 'combo': combo_key})
+                        if bot_state['gann_entry_mode'] == 'touch':
+                            if h >= lvl - (margin_pts * pv) and l <= lvl: signals.append({'type': 'SELL', 'lvl': lvl, 'combo': combo_key})
+                        else:
+                            if tf_idx > 0:
+                                prev_c = float(df_tf.iloc[tf_idx-1]['close'])
+                                if prev_c > lvl and l <= lvl - (2.0 * pv): signals.append({'type': 'SELL', 'lvl': lvl, 'combo': combo_key})
 
                     for sig in signals:
                         is_buy = (sig['type'] == 'BUY')
@@ -513,28 +538,47 @@ async def run_gann_backtest_dates(start_dt: datetime, end_dt: datetime) -> None:
                         
                         tp_px = entry_px + (tp_pts_user * pv) if is_buy else entry_px - (tp_pts_user * pv)
                         sl_px = entry_px - (sl_pts_user * pv) if is_buy else entry_px + (sl_pts_user * pv)
+                        
                         be_px_target = entry_px + (bot_state['be_pips'] * pv) if is_buy else entry_px - (bot_state['be_pips'] * pv)
 
                         sim_df = df_1m[df_1m.index >= bar_t]
                         outcome = 'OPEN'; be_activated = False
                         
-                        # حساب الأرباح بمعادلة دولية قياسية (الربح بالدولار للوت 1.0 = 10$ لكل نقطة)
                         win_val  = round(tp_pts_user * lot * 10, 2)
-                        loss_val = -round(sl_pts_user * lot * 10, 2)
                         p_usd = 0.0
 
                         for _, row in sim_df.iterrows():
                             fh = float(row['high']); fl = float(row['low'])
+                            
+                            # استعادة منطق الـ Trailing Stop بشكل سليم
+                            if bot_state['use_trailing']:
+                                if is_buy:
+                                    if fh - entry_px >= bot_state['trail_offset'] * pv:
+                                        new_sl = fh - (bot_state['trail_points'] * pv)
+                                        if new_sl > sl_px: sl_px = new_sl
+                                else:
+                                    if entry_px - fl >= bot_state['trail_offset'] * pv:
+                                        new_sl = fl + (bot_state['trail_points'] * pv)
+                                        if new_sl < sl_px: sl_px = new_sl
+
                             if bot_state['use_be'] and not be_activated:
                                 if (is_buy and fh >= be_px_target) or (not is_buy and fl <= be_px_target):
-                                    be_activated = True; sl_px = entry_px 
+                                    be_activated = True
+                                    if is_buy: sl_px = max(sl_px, entry_px)
+                                    else: sl_px = min(sl_px, entry_px)
                             
                             if is_buy:
-                                if fl <= sl_px: outcome = 'BREAK-EVEN' if be_activated else 'LOSS'; p_usd = 0.0 if be_activated else loss_val; break
-                                if fh >= tp_px: outcome = 'WIN';  p_usd = win_val; break
+                                if fl <= sl_px: 
+                                    if sl_px >= entry_px: outcome = 'BREAK-EVEN'; p_usd = round(((sl_px - entry_px)/pv) * lot * 10, 2)
+                                    else: outcome = 'LOSS'; p_usd = -round(((entry_px - sl_px)/pv) * lot * 10, 2)
+                                    break
+                                if fh >= tp_px: outcome = 'WIN'; p_usd = win_val; break
                             else:
-                                if fh >= sl_px: outcome = 'BREAK-EVEN' if be_activated else 'LOSS'; p_usd = 0.0 if be_activated else loss_val; break
-                                if fl <= tp_px: outcome = 'WIN';  p_usd = win_val; break
+                                if fh >= sl_px: 
+                                    if sl_px <= entry_px: outcome = 'BREAK-EVEN'; p_usd = round(((entry_px - sl_px)/pv) * lot * 10, 2)
+                                    else: outcome = 'LOSS'; p_usd = -round(((sl_px - entry_px)/pv) * lot * 10, 2)
+                                    break
+                                if fl <= tp_px: outcome = 'WIN'; p_usd = win_val; break
 
                         if outcome == 'OPEN': continue
                         
@@ -575,7 +619,6 @@ async def run_gann_backtest_dates(start_dt: datetime, end_dt: datetime) -> None:
         await prog.set_phase('إنشاء ملف Excel المنسق...')
         fname = f"GannBT_{datetime.now(timezone.utc).strftime('%H%M%S')}.xlsx"
         
-        # ── بناء ملف الإكسل باحترافية والتلوين المطلوب للربح والخسارة ──
         wb = openpyxl.Workbook()
         ws_trades = wb.active
         ws_trades.title = 'الصفقات'
@@ -656,7 +699,6 @@ async def run_gann_backtest_dates(start_dt: datetime, end_dt: datetime) -> None:
 
         wb.save(fname)
 
-        # ── تشكيل رسالة التيليجرام ──
         total_trades = res['win'] + res['loss'] + res['be']
         wr = round(res['win'] / max(1, res['win']+res['loss']) * 100, 1) if (res['win']+res['loss']) > 0 else 0
         dd_pct = round(res['max_dd'] / max(1, res['peak_equity']) * 100, 1) if res['peak_equity'] > 0 else 0
@@ -701,7 +743,7 @@ async def process_tg_update(update: dict) -> None:
             return
 
         if msg == '/start':
-            await send_tg_msg('<b>Gold Scalper Bot v6.0 Universal</b>', get_main_keyboard())
+            await send_tg_msg('<b>Gold Scalper Bot v6.1 Universal</b>', get_main_keyboard())
 
         elif msg.lower().startswith('/set'):
             parts = msg.strip().lower().split()
@@ -761,10 +803,19 @@ async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
     elif d == 'menu_backtest': await _show(chat_id, msg_id, 'الباكتيست:', get_backtest_keyboard())
     elif d == 'hide_keyboard': bot_state['menu_button_map'] = {}; await _show(chat_id, msg_id, 'مخفية.', {'remove_keyboard': True})
 
+    # Strategy restored callbacks
+    elif d == 'cycle_zone_filter': bot_state['gann_zone_filter'] = 'all' if bot_state['gann_zone_filter'] == 'star' else 'star'; await _show(chat_id, msg_id, 'Strategy:', get_strategy_keyboard())
+    elif d == 'cycle_entry_mode': bot_state['gann_entry_mode'] = 'breakout' if bot_state['gann_entry_mode'] == 'touch' else 'touch'; await _show(chat_id, msg_id, 'Strategy:', get_strategy_keyboard())
+    elif d == 'inc_margin': bot_state['gann_touch_margin_pts'] += 1.0; await _show(chat_id, msg_id, 'Strategy:', get_strategy_keyboard())
+    elif d == 'dec_margin': bot_state['gann_touch_margin_pts'] = max(0.0, bot_state['gann_touch_margin_pts'] - 1.0); await _show(chat_id, msg_id, 'Strategy:', get_strategy_keyboard())
     elif d == 'toggle_spam': bot_state['gann_anti_spam'] = not bot_state['gann_anti_spam']; await _show(chat_id, msg_id, 'Strategy:', get_strategy_keyboard())
     elif d == 'toggle_trend': bot_state['use_trend_filter'] = not bot_state['use_trend_filter']; await _show(chat_id, msg_id, 'Strategy:', get_strategy_keyboard())
     elif d == 'cycle_trend_type': bot_state['trend_filter_type'] = 'EMA_CROSS' if bot_state['trend_filter_type'] == 'EMA_200' else 'EMA_200'; await _show(chat_id, msg_id, 'Strategy:', get_strategy_keyboard())
 
+    # Risk & Trailing restored callbacks
+    elif d == 'toggle_trail': bot_state['use_trailing'] = not bot_state['use_trailing']; await _show(chat_id, msg_id, 'Risk:', get_risk_keyboard())
+    elif d == 'inc_trail': bot_state['trail_points'] += 10; await _show(chat_id, msg_id, 'Risk:', get_risk_keyboard())
+    elif d == 'dec_trail': bot_state['trail_points'] = max(10, bot_state['trail_points'] - 10); await _show(chat_id, msg_id, 'Risk:', get_risk_keyboard())
     elif d == 'toggle_be': bot_state['use_be'] = not bot_state['use_be']; await _show(chat_id, msg_id, 'Risk:', get_risk_keyboard())
     elif d == 'view_tpsl': await _show(chat_id, msg_id, 'TP/SL:', get_tpsl_overview_keyboard())
 
@@ -849,7 +900,7 @@ async def main() -> None:
         asyncio.create_task(supervised(telegram_polling_loop, label='tg_polling')),
         asyncio.create_task(supervised(telegram_watchdog,     label='tg_watchdog')),
     ]
-    c_log('Gold Scalper Bot v6.0 Universal started.')
+    c_log('Gold Scalper Bot v6.1 Universal started.')
     try: await asyncio.gather(*tasks)
     finally:
         if _http and not _http.closed: await _http.close()
