@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from aiohttp import web
 import openpyxl
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+from metaapi_cloud_sdk import MetaApi
 
 # ─────────────────────────────────────────────────────────────
 # CONFIGURATION
@@ -358,7 +359,7 @@ def _gann_fmt_levels_msg(symbol: str, close: float) -> str:
     flt_trend = sym_state['trend_filter_type'].upper()
     if flt_trend == 'BOTH': flt_trend = 'VWAP + EMA'
     
-    mode = f'لمس مباشر + فلتر ({flt_trend}_{bot_state["trend_timeframe"].upper()})' if sym_state['gann_entry_mode'] == 'touch_trend' else 'لمس أعمى (بدون فلتر)'
+    mode = f'لمس مباشر + فلتر ({flt_trend}_{sym_state["trend_timeframe"].upper()})' if sym_state['gann_entry_mode'] == 'touch_trend' else 'لمس أعمى (بدون فلتر)'
     return (f"📐 <b>سلّم جان (المروحة) — دورة جديدة</b>\n"
             f"إغلاق H1: <b>{close:.2f}</b>\n\n"
             f"مدة المراقبة: {sym_state['gann_cycle_hours']}س  |  فلتر: {filt}\nالدخول: {mode}\n\n\n"
@@ -466,6 +467,7 @@ _bt_progress: BtProgress | None = None
 # ─────────────────────────────────────────────────────────────
 def get_main_keyboard() -> dict:
     return {'inline_keyboard': [
+        [{'text': '🔌 فحص حالة حساب MetaAPI', 'callback_data': 'check_metaapi_status'}],
         [{'text': '📐 محرك جان (الاستراتيجية)', 'callback_data': 'menu_gann'}],
         [{'text': '🛡️ إعدادات الحماية', 'callback_data': 'menu_protection'}],
         [{'text': '💾 إدارة الإعدادات (Presets)', 'callback_data': 'menu_presets'}],
@@ -1121,7 +1123,54 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
     finally:
         bot_state['is_backtesting'] = False
 
+async def check_metaapi_status_command(chat_id: int):
+    if not METAAPI_TOKEN or METAAPI_TOKEN == 'YOUR_METAAPI_TOKEN':
+        await send_tg_msg("❌ MetaAPI Token غير مهيأ.")
+        return
+    if not ACCOUNT_ID or ACCOUNT_ID == 'YOUR_ACCOUNT_ID':
+        await send_tg_msg("❌ Account ID غير مهيأ.")
+        return
+        
+    await send_tg_msg("⏳ جاري فحص حالة الحساب من MetaAPI...")
+    api = MetaApi(METAAPI_TOKEN)
+    try:
+        account = await api.metatrader_account_api.get_account(ACCOUNT_ID)
+        state = account.state
+        conn_status = account.connection_status
+        
+        msg = f"<b>حالة الحساب (MetaAPI)</b>\n"
+        msg += f"الاسم: {account.name}\n"
+        msg += f"الحالة: {state}\n"
+        msg += f"الاتصال: {conn_status}\n\n"
+        
+        if state == 'DEPLOYED' and conn_status == 'CONNECTED':
+            conn = account.get_rpc_connection()
+            await conn.connect()
+            await conn.wait_synchronized()
+            
+            acc_info = await conn.get_account_information()
+            msg += f"<b>الرصيد:</b> {acc_info.get('balance', 0):.2f}\n"
+            msg += f"<b>الاكويتي:</b> {acc_info.get('equity', 0):.2f}\n"
+            msg += f"<b>الهامش المتاح:</b> {acc_info.get('freeMargin', 0):.2f}\n\n"
+            
+            positions = await conn.get_positions()
+            msg += f"<b>الصفقات المفتوحة:</b> {len(positions)}\n"
+            for p in positions:
+                msg += f"🔸 {p['symbol']} | {p['type']} | {p['volume']} | Profit: {p.get('profit', 0):.2f}\n"
+                
+        else:
+            msg += "⚠️ الحساب غير متصل حالياً لجلب تفاصيل الرصيد والصفقات."
+            
+        await send_tg_msg(msg)
+    except Exception as e:
+        import html
+        await send_tg_msg(f"❌ خطأ في الاتصال بـ MetaAPI:\n{html.escape(str(e))}")
+
 async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
+    if d == 'check_metaapi_status':
+        asyncio.create_task(check_metaapi_status_command(chat_id))
+        return
+
     sym = bot_state['ui_selected_symbol']
     sym_state = bot_state['symbol_state'][sym]
     if d == 'menu_main': await _show(chat_id, msg_id, 'القائمة الرئيسية:', get_main_keyboard())
