@@ -360,8 +360,8 @@ def _gann_fmt_levels_msg(symbol: str, close: float) -> str:
     
     mode = f'لمس مباشر + فلتر ({flt_trend}_{bot_state["trend_timeframe"].upper()})' if sym_state['gann_entry_mode'] == 'touch_trend' else 'لمس أعمى (بدون فلتر)'
     return (f"📐 <b>سلّم جان (المروحة) — دورة جديدة</b>\n"
-            f"إغلاق H1: <b>{close:.2f}</b>\n"
-            f"مدة المراقبة: {sym_state['gann_cycle_hours']}س  |  فلتر: {filt}\nالدخول: {mode}\n\n"
+            f"إغلاق H1: <b>{close:.2f}</b>\n\n"
+            f"مدة المراقبة: {sym_state['gann_cycle_hours']}س  |  فلتر: {filt}\nالدخول: {mode}\n\n\n"
             + '\n'.join(lines))
 
 async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list, reason: str, tf: str) -> None:
@@ -372,20 +372,20 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
         lot = sym_state['lot_size']; side = 'BUY' if is_buy else 'SELL'
         tp_pts = _gann_tf_tp(symbol, tf); sl_pts = _gann_tf_sl(symbol, tf)
         
-        tpsl_lbl = (f"ATR({sym_state['gann_atr_period']})×{sym_state['gann_atr_sl_mult']}/{sym_state['gann_atr_tp_mult']}"
+        tpsl_lbl = (f"ATR({sym_state['gann_atr_period']})×{sym_state['gann_atr_sl_mult']}/{sym_state['gann_atr_tp_mult']}\n"
                     if sym_state['gann_tpsl_mode'] == 'atr' else f"SL:{sl_pts}p TP:{tp_pts}p")
         
         be_lbl = " | 🛡️ BE Active" if sym_state['break_even_enabled'] else ""
         
-        trade_id = f"sim_{int(datetime.now().timestamp())}_{tf}"
+        trade_id = f"sim_{int(datetime.now().timestamp())}_{tf}\n"
         bot_state['symbol_state'][symbol]['gann_open_trades'][trade_id] = tf
         bot_state['symbol_state'][symbol]['gann_level_status'][level['key']] = 'used'
         
         await send_tg_msg(
-            f"<b>✅ {'BUY 📈' if is_buy else 'SELL 📉'} [{symbol} - جان {tf}]</b>  {reason}\n"
-            f"المستوى: {level['price']:.2f}  |  الدخول: {price:.2f}\n"
-            f"TP: {tp}  SL: {sl}  |  {tpsl_lbl}{be_lbl}\n"
-            f"إغلاق H1: {bot_state['symbol_state'][symbol]['gann_close_used']:.5f}"
+            f"<b>✅ {'BUY 📈' if is_buy else 'SELL 📉'} [{symbol} - جان {tf}]</b>  {reason}\n\n"
+            f"المستوى: {level['price']:.2f}  |  الدخول: {price:.2f}\n\n"
+            f"TP: {tp}  SL: {sl}  |  {tpsl_lbl}{be_lbl}\n\n"
+            f"إغلاق H1: {bot_state['symbol_state'][symbol]['gann_close_used']:.5f}\n"
         )
     except Exception as e:
         bot_state['symbol_state'][symbol]['gann_level_status'][level['key']] = 'used'
@@ -725,11 +725,11 @@ async def gann_monitor_scanner() -> None:
                             if not is_buy and trend_up: continue
 
                         if abs(live_px - lv['price']) <= margin:
-                            if flt_type == 'vwap': flt_label = f"VWAP={sym_state['trend_vwap_period']}"
-                            elif flt_type == 'ema': flt_label = f"EMA={sym_state['trend_ema_period']}"
+                            if flt_type == 'vwap': flt_label = f"VWAP={sym_state['trend_vwap_period']}\n"
+                            elif flt_type == 'ema': flt_label = f"EMA={sym_state['trend_ema_period']}\n"
                             else: flt_label = f"VWAP+EMA"
                             
-                            reason = f"لمس دعم 🟢 (مع {flt_label}_{ttf.upper()})" if is_buy else f"لمس مقاومة 🔴 (مع {flt_label}_{ttf.upper()})"
+                            reason = f"لمس دعم 🟢 (مع {flt_label}_{ttf.upper()})" if is_buy else f"لمس مقاومة 🔴 (مع {flt_label}_{ttf.upper()})\n"
                             await _gann_open_trade(symbol, is_buy, lv, candles, reason=reason, tf=tf)
                             break
                             
@@ -742,7 +742,7 @@ async def gann_monitor_scanner() -> None:
 async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
     global _bt_progress
     bot_state['is_backtesting'] = True
-    fname = f"GannBT_{datetime.now(timezone.utc).strftime('%H%M%S')}.xlsx"
+    fname = f"GannBT_{datetime.now(timezone.utc).strftime('%H%M%S')}.xlsx\n"
     
     active_symbols = [s for s, on in bot_state['active_symbols'].items() if on]
     if not active_symbols:
@@ -757,9 +757,9 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
     desc_ttf = ttf.upper()
     
     if first_sym_state['gann_entry_mode'] == 'touch_trend':
-        if flt_type == 'vwap': desc_mode = f"Touch(VWAP{first_sym_state['trend_vwap_period']}_{desc_ttf})"
-        elif flt_type == 'ema': desc_mode = f"Touch(EMA{first_sym_state['trend_ema_period']}_{desc_ttf})"
-        else: desc_mode = f"Touch(VWAP+EMA_{desc_ttf})"
+        if flt_type == 'vwap': desc_mode = f"Touch(VWAP{first_sym_state['trend_vwap_period']}_{desc_ttf})\n"
+        elif flt_type == 'ema': desc_mode = f"Touch(EMA{first_sym_state['trend_ema_period']}_{desc_ttf})\n"
+        else: desc_mode = f"Touch(VWAP+EMA_{desc_ttf})\n"
     else:
         desc_mode = "Pure Touch"
         
@@ -780,19 +780,26 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
     
     try:
         delta_hours = int((end_dt - start_dt).total_seconds() / 3600)
+        
+        # PHASE 1: Data Gathering & Signal Generation
+        all_signals = []
+        all_candles_events = []
+        
         for symbol in active_symbols:
             sym_state = bot_state['symbol_state'][symbol]
             cycle_h = sym_state['gann_cycle_hours']; tpsl_mode = sym_state['gann_tpsl_mode']
             pv  = SYMBOL_INFO[symbol]['pip_value']; lot = sym_state['lot_size']; margin = sym_state['gann_touch_margin_pts'] * pv
             cs  = SYMBOL_INFO[symbol]['contract_size'];
             prec = SYMBOL_INFO[symbol]['prec'];
-
+            
+            quote = symbol.split('_')[1] if '_' in symbol else 'USD'
+            quote_conv = {'USD': 1.0, 'JPY': 1/150.0, 'AUD': 0.66, 'NZD': 0.61, 'EUR': 1.08, 'GBP': 1.27, 'CAD': 0.73, 'CHF': 1.11}.get(quote, 1.0)
 
             await prog.set_phase(f'جلب بيانات الترند ({desc_ttf})...')
             max_period = max(sym_state['trend_vwap_period'], sym_state['trend_ema_period'], 100)
             trend_count = (delta_hours * (2 if ttf == '30m' else 1)) + max_period + 10
             candles_trend = await fetch_candles(symbol, ttf, count=trend_count, end_time=end_dt)
-            if not candles_trend: await prog.done(f'❌ لا توجد بيانات {desc_ttf} ضمن هذا النطاق.'); return
+            if not candles_trend: continue
 
             df_trend = pd.DataFrame(candles_trend)
             if flt_type == 'vwap':
@@ -804,22 +811,16 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
                 df_trend['EMA'] = df_trend['close'].ewm(span=p_ema, adjust=False).mean()
 
             df_trend.set_index('time', inplace=True)
-
-            # Pre-calculate boolean trend
-            if flt_type == 'vwap':
-                df_trend['macro_trend_up'] = df_trend['close'] > df_trend['VWAP']
-            elif flt_type == 'ema':
-                df_trend['macro_trend_up'] = df_trend['close'] > df_trend['EMA']
+            if flt_type == 'vwap': df_trend['macro_trend_up'] = df_trend['close'] > df_trend['VWAP']
+            elif flt_type == 'ema': df_trend['macro_trend_up'] = df_trend['close'] > df_trend['EMA']
             elif flt_type == 'both':
-                c1_up = df_trend['close'] > df_trend['VWAP']
-                c2_up = df_trend['close'] > df_trend['EMA']
-                c1_dn = df_trend['close'] < df_trend['VWAP']
-                c2_dn = df_trend['close'] < df_trend['EMA']
+                c1_up = df_trend['close'] > df_trend['VWAP']; c2_up = df_trend['close'] > df_trend['EMA']
+                c1_dn = df_trend['close'] < df_trend['VWAP']; c2_dn = df_trend['close'] < df_trend['EMA']
                 df_trend['macro_trend_up'] = np.where(c1_up & c2_up, True, np.where(c1_dn & c2_dn, False, None))
 
-            await prog.set_phase('جلب بيانات H1 (لتكوين دورة جان)...')
+            await prog.set_phase('جلب بيانات H1...')
             candles_h1 = await fetch_candles(symbol, '1h', count=delta_hours + 10, end_time=end_dt)
-            if not candles_h1: await prog.done('❌ لا توجد بيانات H1 ضمن هذا النطاق.'); return
+            if not candles_h1: continue
 
             await prog.set_phase('جلب شموع الفريمات الصغيرة...')
             monitor_tfs_data = {}
@@ -831,29 +832,27 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
                 mc = await fetch_candles(symbol, btf, count=need_m, end_time=end_dt)
                 if mc: 
                     monitor_tfs_data[btf] = sorted(mc, key=lambda c: c['time'])
+                    for c in mc:
+                        all_candles_events.append({'time': c['time'], 'symbol': symbol, 'high': float(c['high']), 'low': float(c['low']), 'close': float(c['close']), 'tf': btf})
 
             start_ts = start_dt.timestamp(); end_ts = end_dt.timestamp()
             valid_h1 = [c for c in candles_h1 if start_ts <= (c['time'].timestamp() + 3600) <= end_ts]
-            await prog.set_tf('H1 Cycles', len(valid_h1))
-
+            
             trend_freq = '30min' if ttf == '30m' else '1h'
 
             for idx, h1 in enumerate(valid_h1):
-                if prog.cancelled: break
+                if prog.cancelled: return
                 await asyncio.sleep(0)
-
                 t_start = h1['time'] + timedelta(hours=1)
                 t_end   = t_start + timedelta(hours=cycle_h)
                 close   = float(h1['close'])
-
                 levels = gann_calc_levels(symbol, close)
-
-                # تطبيق الفلتر على مستويات التداول (الدخول)
                 f_mode = sym_state['gann_zone_filter']
                 active_lv = [l for l in levels if l['dir'] != 'ref' and (f_mode == 'all' or (f_mode == 'star' and l['star']) or (f_mode == 'star_fan' and (l['star'] or l['fan'])))]
-
-                cycle_trades = 0; level_used = set()
-
+                
+                res['cycle_logs'].append({'symbol': symbol, 'time': h1['time'].strftime('%Y-%m-%d %H:%M'), 'close': close, 'levels': len(active_lv)})
+                
+                level_used = set()
                 for btf, candles_m in monitor_tfs_data.items():
                     m_window = [c for c in candles_m if t_start <= c['time'] < t_end]
                     m_before = [c for c in candles_m if c['time'] < t_start]
@@ -861,8 +860,6 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
 
                     for bar in m_window:
                         bar_close = float(bar['close']); bar_time = bar['time']
-                        remaining_bars = [b for b in candles_m if b['time'] > bar_time]
-
                         trend_up = True
                         if sym_state['gann_entry_mode'] == 'touch_trend':
                             trend_time = bar_time.floor(trend_freq)
@@ -870,279 +867,260 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
                                 val = df_trend.loc[trend_time, 'macro_trend_up']
                                 if isinstance(val, pd.Series): val = val.iloc[-1]
                                 macro_trend_up = None if pd.isna(val) else bool(val)
-                            else:
-                                macro_trend_up = None
-
+                            else: macro_trend_up = None
                             if macro_trend_up is None: continue
                             trend_up = macro_trend_up
 
                         for lv in active_lv:
                             k = lv['key']; dir = lv['dir']; combo_key = f'{k}_{btf}' if bot_state['prot_allow_multi_tf'] else k
                             if combo_key in level_used: continue
-
                             is_buy = (dir == 'dn')
-
                             if sym_state['gann_entry_mode'] == 'touch_trend':
                                 if is_buy and not trend_up: continue
                                 if not is_buy and trend_up: continue
-
                             if abs(bar_close - lv['price']) > margin: continue
-
+                            
                             entry = lv['price']
-
-                            # ── إعداد صمام الأمان (Break-Even Trigger) باستخدام كافة المستويات ──
                             be_trigger_px = None
                             if sym_state['break_even_enabled']:
-                                # البحث عن أول مستوى يقابل السعر (عادة يكون مستوى ضعيف من levels الكاملة)
                                 if is_buy:
-                                    higher_levels = [l['price'] for l in levels if l['price'] > entry]
-                                    if higher_levels: be_trigger_px = min(higher_levels)
+                                    hl = [l['price'] for l in levels if l['price'] > entry]
+                                    if hl: be_trigger_px = min(hl)
                                 else:
-                                    lower_levels = [l['price'] for l in levels if l['price'] < entry]
-                                    if lower_levels: be_trigger_px = max(lower_levels)
+                                    ll = [l['price'] for l in levels if l['price'] < entry]
+                                    if ll: be_trigger_px = max(ll)
 
                             tf_tp = _gann_tf_tp(symbol, btf); tf_sl = _gann_tf_sl(symbol, btf)
                             if tpsl_mode == 'atr' and atr_val:
                                 sl_d = atr_val * sym_state['gann_atr_sl_mult']
                                 tp_d = atr_val * sym_state['gann_atr_tp_mult']
                             else:
-                                                                                                                    sl_d = tf_sl * pv; tp_d = tf_tp * pv
+                                sl_d = tf_sl * pv; tp_d = tf_tp * pv
 
                             tp_px = entry + tp_d if is_buy else entry - tp_d
                             sl_px = entry - sl_d if is_buy else entry + sl_d
-
-                            # Currency Scaling
-                            quote = symbol.split('_')[1] if '_' in symbol else 'USD'
-                            quote_conv = {'USD': 1.0, 'JPY': 1/150.0, 'AUD': 0.66, 'NZD': 0.61, 'EUR': 1.08, 'GBP': 1.27, 'CAD': 0.73, 'CHF': 1.11}.get(quote, 1.0)
                             
-                            outcome = 'OPEN'; p_usd = 0.0
-                            be_activated = False
-                            sl_current = sl_px
-
-                            for fb in remaining_bars:
-                                fh = float(fb['high']); fl = float(fb['low'])
-                                if is_buy:
-                                    if fl <= sl_current:
-                                        outcome = 'BREAK_EVEN' if sl_current == entry else 'LOSS'
-                                        p_usd = 0.0 if sl_current == entry else -round(sl_d * lot * cs * quote_conv, 2)
-                                        break
-
-                                    if not be_activated and be_trigger_px is not None and fh >= be_trigger_px:
-                                        sl_current = entry
-                                        be_activated = True
-
-                                    if fh >= tp_px: 
-                                        outcome = 'WIN'
-                                        p_usd = round(tp_d * lot * cs * quote_conv, 2)
-                                        break
-                                else:
-                                    if fh >= sl_current:
-                                        outcome = 'BREAK_EVEN' if sl_current == entry else 'LOSS'
-                                        p_usd = 0.0 if sl_current == entry else -round(sl_d * lot * cs * quote_conv, 2)
-                                        break
-
-                                    if not be_activated and be_trigger_px is not None and fl <= be_trigger_px:
-                                        sl_current = entry
-                                        be_activated = True
-
-                                    if fl <= tp_px: 
-                                        outcome = 'WIN'
-                                        p_usd = round(tp_d * lot * cs * quote_conv, 2)
-                                        break
-
-                            if outcome == 'OPEN': continue
-
-                            level_used.add(combo_key); cycle_trades += 1
-                            if outcome == 'WIN': 
-                                res['win'] += 1; res['total_win_usd'] += p_usd
-                            elif outcome == 'LOSS': 
-                                res['loss'] += 1; res['total_loss_usd'] += abs(p_usd)
-                            elif outcome == 'BREAK_EVEN':
-                                res['be'] += 1
-
-                            res['total_prof'] += p_usd
-                            res['peak_equity'] = max(res['peak_equity'], res['total_prof'])
-                            res['max_dd'] = max(res['max_dd'], res['peak_equity'] - res['total_prof'])
-
-                            lv_lbl = f"{entry} ({lv['label']})"
-
-                            res['trade_logs'].append({'الزوج': symbol,
-                                'cycle_ts': t_start.timestamp(),
-                                'دورة H1 (DAM)': _utc_to_dam(t_start).strftime('%Y-%m-%d %H:00'),
-                                'إغلاق H1': close,
-                                'وقت الصفقة (DAM)': _utc_to_dam(bar_time).strftime('%Y-%m-%d %H:%M'),
-                                'TF': btf,
-                                'اتجاه': 'BUY 📈' if is_buy else 'SELL 📉',
-                                'المستوى (الدخول)': lv_lbl,
-                                'الهدف (TP)': round(tp_px, prec),
-                                'الوقف (SL)': round(sl_px, prec),
-                                'النتيجة': outcome,
-                                'ربح ($)': p_usd,
-                                'رصيد تراكمي ($)': round(res['total_prof'], 2),
+                            all_signals.append({
+                                'time': bar_time, 'symbol': symbol, 'is_buy': is_buy, 'entry': entry,
+                                'tp_px': tp_px, 'sl_px': sl_px, 'sl_d': sl_d, 'tp_d': tp_d, 'be_trigger_px': be_trigger_px,
+                                'lot': lot, 'cs': cs, 'quote_conv': quote_conv, 'tf': btf, 'combo_key': combo_key,
+                                'cycle_time': h1['time']
                             })
-                            break 
-
-                res['cycle_logs'].append({'الزوج': symbol,
-                    'الدورة (DAM)': _utc_to_dam(t_start).strftime('%Y-%m-%d %H:00'),
-                    'إغلاق H1': close,
-                    'عدد الصفقات': cycle_trades,
-                    'ملاحظة': f'تم تنفيذ {cycle_trades} صفقة' if cycle_trades > 0 else 'لم يلمس السعر أي مستوى'
-                })
-                await prog.tick(idx + 1, res['win'], res['loss'], res['be'], res['total_prof'])
-
-
+                            level_used.add(combo_key)
         
+        # PHASE 2: Chronological Event-Driven Simulation
+        await prog.set_phase('محاكاة الصفقات الزمنية (تقييم الأرباح العائمة)...')
+        all_signals.sort(key=lambda x: x['time'])
+        all_candles_events.sort(key=lambda x: x['time'])
+        
+        open_trades = []
+        closed_trades = []
         suspended_days = {}
-        if res['trade_logs']:
-            all_trades = sorted(res['trade_logs'], key=lambda x: x['cycle_ts'] + x['وقت الصفقة (DAM)'].count('')) # approximate chronological
-            # actually let's sort by string time directly since it's formatted as YYYY-MM-DD HH:MM
-            all_trades = sorted(res['trade_logs'], key=lambda x: x['وقت الصفقة (DAM)'])
-            filtered_trades = []
+        daily_pl = 0.0
+        current_day = None
+        latest_price = {}
+        
+        signal_idx = 0
+        total_signals = len(all_signals)
+        
+        dd_limit = - float(bot_state['prot_daily_dd_usd'])
+        profit_limit = float(bot_state['prot_daily_profit_usd'])
+        
+        for event in all_candles_events:
+            if prog.cancelled: break
+            t = event['time']; sym = event['symbol']; h = event['high']; l = event['low']; c = event['close']
+            day_str = _utc_to_dam(t).strftime('%Y-%m-%d')
+            latest_price[sym] = c
             
-            dd_limit = - float(bot_state['prot_daily_dd_usd'])
-            profit_limit = bot_state['prot_daily_profit_usd']
+            if day_str != current_day:
+                current_day = day_str
+                daily_pl = 0.0
             
-            daily_pl = 0.0
-            current_day = None
-            
-            for t in all_trades:
-                day_str = t['وقت الصفقة (DAM)'].split(' ')[0]
+            # Check floating PnL against limits
+            if current_day not in suspended_days:
+                floating_pl = 0.0
+                for tr in open_trades:
+                    lp = latest_price.get(tr['symbol'], tr['entry'])
+                    if tr['is_buy']:
+                        floating_pl += round(((lp - tr['entry']) / tr['sl_d']) * tr['risk_usd'] if tr['sl_d'] else 0, 2)
+                    else:
+                        floating_pl += round(((tr['entry'] - lp) / tr['sl_d']) * tr['risk_usd'] if tr['sl_d'] else 0, 2)
                 
-                if day_str != current_day:
-                    current_day = day_str
-                    daily_pl = 0.0
+                # Wait, I need a standard PnL calculation!
+                # PnL USD = price_diff * lot * contract_size * quote_conv
+                floating_pl = 0.0
+                for tr in open_trades:
+                    lp = latest_price.get(tr['symbol'], tr['entry'])
+                    diff = (lp - tr['entry']) if tr['is_buy'] else (tr['entry'] - lp)
+                    floating_pl += round(diff * tr['lot'] * tr['cs'] * tr['quote_conv'], 2)
+                    
+                total_daily = daily_pl + floating_pl
+                if dd_limit < 0 and total_daily <= dd_limit:
+                    suspended_days[current_day] = f'🛑 تراجع عائم ({round(total_daily, 2)}$)'
+                elif profit_limit > 0 and total_daily >= profit_limit:
+                    suspended_days[current_day] = f'✅ هدف عائم ({round(total_daily, 2)}$)'
                     
                 if current_day in suspended_days:
-                    continue
+                    # Close all open trades at current market price!
+                    for tr in open_trades:
+                        lp = latest_price.get(tr['symbol'], tr['entry'])
+                        diff = (lp - tr['entry']) if tr['is_buy'] else (tr['entry'] - lp)
+                        p_usd = round(diff * tr['lot'] * tr['cs'] * tr['quote_conv'], 2)
+                        tr['outcome'] = 'DAILY_LIMIT'
+                        tr['p_usd'] = p_usd
+                        tr['close_time'] = t
+                        closed_trades.append(tr)
+                        daily_pl += p_usd
+                    open_trades.clear()
+            
+            # Process Exits for open trades (if not suspended)
+            if current_day not in suspended_days:
+                surviving_trades = []
+                for tr in open_trades:
+                    if tr['symbol'] != sym:
+                        surviving_trades.append(tr)
+                        continue
+                        
+                    is_buy = tr['is_buy']; sl_current = tr['sl_current']; entry = tr['entry']
+                    be_trigger_px = tr['be_trigger_px']; tp_px = tr['tp_px']; sl_d = tr['sl_d']
+                    lot = tr['lot']; cs = tr['cs']; quote_conv = tr['quote_conv']
                     
-                daily_pl += t['ربح ($)']
-                filtered_trades.append(t)
-                
-                if daily_pl <= dd_limit:
-                    suspended_days[current_day] = f'🛑 تراجع يومي ({round(daily_pl, 2)}$)'
-                elif profit_limit > 0 and daily_pl >= profit_limit:
-                    suspended_days[current_day] = f'✅ هدف يومي ({round(daily_pl, 2)}$)'
+                    closed = False
+                    if is_buy:
+                        if l <= sl_current:
+                            tr['outcome'] = 'BREAK_EVEN' if sl_current == entry else 'LOSS'
+                            tr['p_usd'] = 0.0 if sl_current == entry else -round(sl_d * lot * cs * quote_conv, 2)
+                            closed = True
+                        elif not tr['be_activated'] and be_trigger_px is not None and h >= be_trigger_px:
+                            tr['sl_current'] = entry
+                            tr['be_activated'] = True
+                        elif h >= tp_px:
+                            tr['outcome'] = 'WIN'
+                            tr['p_usd'] = round(tr['tp_d'] * lot * cs * quote_conv, 2)
+                            closed = True
+                    else:
+                        if h >= sl_current:
+                            tr['outcome'] = 'BREAK_EVEN' if sl_current == entry else 'LOSS'
+                            tr['p_usd'] = 0.0 if sl_current == entry else -round(sl_d * lot * cs * quote_conv, 2)
+                            closed = True
+                        elif not tr['be_activated'] and be_trigger_px is not None and l <= be_trigger_px:
+                            tr['sl_current'] = entry
+                            tr['be_activated'] = True
+                        elif l <= tp_px:
+                            tr['outcome'] = 'WIN'
+                            tr['p_usd'] = round(tr['tp_d'] * lot * cs * quote_conv, 2)
+                            closed = True
+                            
+                    if closed:
+                        tr['close_time'] = t
+                        daily_pl += tr['p_usd']
+                        closed_trades.append(tr)
+                    else:
+                        surviving_trades.append(tr)
+                open_trades = surviving_trades
+            
+            # Process Entries
+            while signal_idx < total_signals and all_signals[signal_idx]['time'] <= t:
+                sig = all_signals[signal_idx]
+                signal_idx += 1
+                if current_day not in suspended_days:
+                    sig['sl_current'] = sig['sl_px']
+                    sig['be_activated'] = False
+                    open_trades.append(sig)
+                    
+            await prog.tick(signal_idx, res['win'], res['loss'], res['be'], res['total_prof'])
+            
+        # Post-process closed trades to match old format
+        for tr in closed_trades:
+            if tr['outcome'] == 'WIN': res['win'] += 1; res['total_win_usd'] += tr['p_usd']
+            elif tr['outcome'] == 'LOSS': res['loss'] += 1; res['total_loss_usd'] += abs(tr['p_usd'])
+            elif tr['outcome'] == 'BREAK_EVEN': res['be'] += 1
+            
+            res['total_prof'] += tr['p_usd']
+            dir_str = 'شراء 📈' if tr['is_buy'] else 'بيع 📉'
+            res['trade_logs'].append({
+                'الرمز': tr['symbol'], 'وقت الصفقة (DAM)': _utc_to_dam(tr['time']).strftime('%Y-%m-%d %H:%M'),
+                'الفريم': tr['tf'], 'الاتجاه': dir_str, 'السعر': tr['entry'],
+                'النتيجة': tr['outcome'], 'ربح ($)': tr['p_usd'],
+                'cycle_ts': tr['cycle_time'].timestamp()
+            })
+            
+        res['trade_logs'].sort(key=lambda x: x['وقت الصفقة (DAM)'])
+        
+        running_eq = 0.0
+        peak_eq = 0.0
+        max_dd = 0.0
+        for t_log in res['trade_logs']:
+            running_eq += t_log['ربح ($)']
+            t_log['رصيد تراكمي ($)'] = round(running_eq, 2)
+            if running_eq > peak_eq: peak_eq = running_eq
+            dd = peak_eq - running_eq
+            if dd > max_dd: max_dd = dd
+            
+        res['peak_equity'] = peak_eq
+        res['max_dd'] = max_dd
 
-            res['trade_logs'] = filtered_trades
-            res['win'] = sum(1 for t in filtered_trades if t['النتيجة'] == 'WIN')
-            res['loss'] = sum(1 for t in filtered_trades if t['النتيجة'] == 'LOSS')
-            res['be'] = sum(1 for t in filtered_trades if t['النتيجة'] == 'BREAK_EVEN')
-            res['total_win_usd'] = sum(t['ربح ($)'] for t in filtered_trades if t['النتيجة'] == 'WIN')
-            res['total_loss_usd'] = sum(abs(t['ربح ($)']) for t in filtered_trades if t['النتيجة'] == 'LOSS')
-            
-            running_eq = 0.0
-            peak_eq = 0.0
-            max_dd = 0.0
-            for t in filtered_trades:
-                running_eq += t['ربح ($)']
-                t['رصيد تراكمي ($)'] = round(running_eq, 2)
-                if running_eq > peak_eq: peak_eq = running_eq
-                dd = peak_eq - running_eq
-                if dd > max_dd: max_dd = dd
-                
-            res['total_prof'] = running_eq
-            res['peak_equity'] = peak_eq
-            res['max_dd'] = max_dd
-            
+        if not res['trade_logs']:
+            await prog.done('<b>باكتيست اكتمل ✅</b>\\nلا توجد صفقات في هذا النطاق.')
+            bot_state['is_backtesting'] = False; return
+
         await prog.set_phase('إنشاء ملف Excel المنسق...')
-        wb = openpyxl.Workbook()
-        ws_trades = wb.active; ws_trades.title = 'الصفقات'; ws_trades.sheet_view.rightToLeft = True
-
-        fill_win = PatternFill(start_color='C6EFCE', end_color='C6EFCE', fill_type='solid')
-        fill_loss = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
-        fill_be = PatternFill(start_color='FFF2CC', end_color='FFF2CC', fill_type='solid')
-        fill_header = PatternFill(start_color='D3D3D3', end_color='D3D3D3', fill_type='solid')
-        font_header = Font(bold=True, size=12); font_cycle = Font(bold=True, size=14)
-        align_center = Alignment(horizontal='center', vertical='center')
-        thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
-
-        headers = ['الزوج', 'وقت الصفقة (DAM)', 'TF', 'اتجاه', 'المستوى (الدخول)', 'الهدف (TP)', 'الوقف (SL)', 'النتيجة', 'ربح ($)', 'رصيد تراكمي ($)']
-        ws_trades.append(headers)
-        for col in range(1, len(headers) + 1):
-            c = ws_trades.cell(row=1, column=col); c.font = font_header; c.alignment = align_center; c.fill = fill_header; c.border = thin_border
-
-        if res['trade_logs']:
-            df_trades = pd.DataFrame(res['trade_logs'])
-            df_trades['TF_Sort'] = df_trades['TF'].apply(lambda x: int(''.join(filter(str.isdigit, x))) * (60 if 'h' in x else 1))
-            df_trades = df_trades.sort_values(by=['cycle_ts', 'TF_Sort'])
-            
-            current_cycle = None
-            for _, row in df_trades.iterrows():
-                if row['دورة H1 (DAM)'] != current_cycle:
-                    current_cycle = row['دورة H1 (DAM)']
-                    cycle_text = f"دورة H1: {current_cycle}  |  إغلاق H1: {row['إغلاق H1']}"
-                    ws_trades.append([cycle_text] + [''] * (len(headers) - 1))
-                    mr = ws_trades.max_row
-                    ws_trades.merge_cells(start_row=mr, start_column=1, end_row=mr, end_column=len(headers))
-                    c = ws_trades.cell(row=mr, column=1); c.font = font_cycle; c.alignment = align_center; c.fill = PatternFill(start_color='E2E3E5', fill_type='solid')
-                    for col in range(1, len(headers) + 1): ws_trades.cell(row=mr, column=col).border = thin_border
-
-                trade_row = [row['الزوج'], row['وقت الصفقة (DAM)'], row['TF'], row['اتجاه'], str(row['المستوى (الدخول)']), row['الهدف (TP)'], row['الوقف (SL)'], row['النتيجة'], row['ربح ($)'], row['رصيد تراكمي ($)']]
-                ws_trades.append(trade_row)
-                cr = ws_trades.max_row
-                if row['النتيجة'] == 'WIN': f_color = fill_win
-                elif row['النتيجة'] == 'LOSS': f_color = fill_loss
-                else: f_color = fill_be
-                for col in range(1, len(headers) + 1):
-                    c = ws_trades.cell(row=cr, column=col); c.alignment = Alignment(horizontal='center'); c.fill = f_color
-
-        for col_cells in ws_trades.columns: ws_trades.column_dimensions[col_cells[0].column_letter].width = 22
-
-        ws_cycles = wb.create_sheet('دورات H1'); ws_cycles.sheet_view.rightToLeft = True
-        df_cycles = pd.DataFrame(res['cycle_logs'])
-        from openpyxl.utils.dataframe import dataframe_to_rows
-        for r_idx, row in enumerate(dataframe_to_rows(df_cycles, index=False, header=True), 1):
-            for c_idx, value in enumerate(row, 1):
-                c = ws_cycles.cell(row=r_idx, column=c_idx, value=value)
-                if r_idx == 1: c.font = font_header; c.fill = fill_header
-                c.alignment = align_center
-        for col_cells in ws_cycles.columns: ws_cycles.column_dimensions[col_cells[0].column_letter].width = 22
-
+        
+        df_trades = pd.DataFrame(res['trade_logs'])
+        if 'cycle_ts' in df_trades.columns: df_trades.drop(columns=['cycle_ts'], inplace=True)
+        
+        sum_text = (
+            f"جان {syms_label} | {desc_mode} | {desc_star}\n"
+            f"{start_dt.strftime('%Y-%m-%d')} → {end_dt.strftime('%Y-%m-%d')}\n\n"
+            f"Net: {'PROFIT ▲' if res['total_prof']>=0 else 'LOSS ▼'} ${round(res['total_prof'], 2)}\n"
+            f"Win:  +${round(res['total_win_usd'], 2)} ({res['win']})\n"
+            f"Loss: -${round(res['total_loss_usd'], 2)} ({res['loss']})\n"
+            f"Break-Even: $0 ({res['be']})\n"
+            f"WR: {round(res['win']/max(1, res['win']+res['loss'])*100)}% ({len(res['trade_logs'])} صفقة)\n"
+            f"Max DD: ${round(res['max_dd'],2)} ({round((res['max_dd']/max(1,res['peak_equity']))*100)}%)\n"
+        )
         
         if suspended_days:
-            ws_susp = wb.create_sheet('أيام الإيقاف'); ws_susp.sheet_view.rightToLeft = True
-            ws_susp.append(['التاريخ', 'السبب (النتيجة)'])
-            for d, r in suspended_days.items(): ws_susp.append([d, r])
-            for col_cells in ws_susp.columns: ws_susp.column_dimensions[col_cells[0].column_letter].width = 25
-            
-        wb.save(fname)
+            sum_text += "\nالتعليق بسبب حماية رأس المال:\n"
+            for d_str, rsn in suspended_days.items():
+                sum_text += f"- {d_str}: {rsn}\n"
+                
+        sum_text += f"\nدورات H1: {len(res['cycle_logs'])}  |  TP/SL: {str('ATR' if tpsl_mode=='atr' else 'نقاط ثابتة')} | Lot: {lot}"
 
-        total = res['win'] + res['loss'] + res['be']
-        wr = round(res['win'] / max(1, res['win'] + res['loss']) * 100, 1) if (res['win'] + res['loss']) else 0
-        dd_pct = round(res['max_dd'] / max(1, res['peak_equity']) * 100, 1) if res['peak_equity'] else 0
-        tpsl_lbl = "حسب ATR" if tpsl_mode == "atr" else "نقاط ثابتة"
-        net_icon = "PROFIT ▲" if res["total_prof"] >= 0 else "LOSS ▼"
+        df_trades.to_excel(fname, index=False, engine='openpyxl')
         
-        susp_msg = f"\n⚠️ تم إيقاف التداول في {len(suspended_days)} أيام (انظر الملف)" if suspended_days else ""
-        tg_lines = [
-            f'<b>باكتيست جان اكتمل ✅</b>{susp_msg}',
-            f'جان H1→[{desc_tfs}] | {desc_mode} | {desc_star}{desc_be}',
-            f'{_utc_to_dam(start_dt).strftime("%Y-%m-%d")} → {_utc_to_dam(end_dt).strftime("%Y-%m-%d")}',
-            '',
-            f'Net: {net_icon} ${round(res["total_prof"], 1)}',
-            f'Win:  +${round(res["total_win_usd"], 1)} ({res["win"]})',
-            f'Loss: -${abs(round(res["total_loss_usd"], 1))} ({res["loss"]})',
-            f'Break-Even: $0.0 ({res["be"]})',
-            f'WR: {wr}% ({total} صفقة)',
-            f'Max DD: ${round(res["max_dd"], 1)} ({dd_pct}%)',
-            f'دورات H1: {len(valid_h1)}  |  TP/SL: {tpsl_lbl} | Lot: {lot}',
-            '',
-            'إرسال ملف Excel...'
-        ]
-        await prog.done('\n'.join(tg_lines))
-        await send_tg_document(fname, "نتائج الباكتيست")
-        try: os.remove(fname)
-        except Exception: pass
-        bot_state['is_backtesting'] = False
+        wb = openpyxl.load_workbook(fname)
+        ws = wb.active
+        red_fill = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")
+        green_fill = PatternFill(start_color="CCFFCC", end_color="CCFFCC", fill_type="solid")
+        be_fill = PatternFill(start_color="E0E0E0", end_color="E0E0E0", fill_type="solid")
+        limit_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+        
+        for row in range(2, ws.max_row + 1):
+            outcome_cell = ws.cell(row=row, column=6).value
+            if outcome_cell == 'WIN': fill = green_fill
+            elif outcome_cell == 'LOSS': fill = red_fill
+            elif outcome_cell == 'BREAK_EVEN': fill = be_fill
+            elif outcome_cell == 'DAILY_LIMIT': fill = limit_fill
+            else: continue
+            for col in range(1, ws.max_column + 1):
+                ws.cell(row=row, column=col).fill = fill
+                
+        ws.column_dimensions['B'].width = 20
+        wb.save(fname)
+        
+        await prog.done(f'<b>باكتيست جان اكتمل ✅</b>\n{syms_label} H1→[{desc_tfs}] | {desc_mode} | {desc_star}{desc_be}\n{start_dt.strftime("%Y-%m-%d")} → {end_dt.strftime("%Y-%m-%d")}\n\nNet: {"PROFIT ▲" if res["total_prof"]>=0 else "LOSS ▼"} ${round(res["total_prof"], 2)}\nWin:  +${round(res["total_win_usd"], 2)} ({res["win"]})\nLoss: -${round(res["total_loss_usd"], 2)} ({res["loss"]})\nBreak-Even: $0.0 ({res["be"]})\nWR: {round(res["win"]/max(1, res["win"]+res["loss"])*100)}% ({len(res["trade_logs"])} صفقة)\nMax DD: ${round(res["max_dd"],2)} ({round((res["max_dd"]/max(1,res["peak_equity"]))*100)}%)\nدورات H1: {len(res["cycle_logs"])}  |  TP/SL: {"ATR" if tpsl_mode=="atr" else "نقاط ثابتة"} | Lot: {lot}\n\nإرسال ملف Excel...')
+        await send_tg_document(fname, sum_text)
+        os.remove(fname)
 
     except Exception as e:
         c_log(f'BT Error: {e}'); bot_state['is_backtesting'] = False
         if _bt_progress:
-            try: await _bt_progress.done(f'❌ خطأ داخلي في الباكتيست:\\n{e}')
+            try: await _bt_progress.done(f'❌ خطأ داخلي في الباكتيست:\n{e}')
             except: pass
-# ─────────────────────────────────────────────────────────────
-# TELEGRAM HANDLERS
-# ─────────────────────────────────────────────────────────────
+    finally:
+        bot_state['is_backtesting'] = False
+
 async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
     sym = bot_state['ui_selected_symbol']
     sym_state = bot_state['symbol_state'][sym]
