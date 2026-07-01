@@ -1,4 +1,3 @@
-import json
 """
 Gold Scalper Bot — v8.9 (Triple Filter, Fan Labels & Smart Break-Even)
 Strategy : Gann Levels + Fan Angles + Break-Even Triggered by Noise Levels
@@ -66,7 +65,7 @@ bot_state: dict = {
     'is_backtesting':   False,
     'timeframes':       _TFS,
 
-    
+    'lot_size':         0.03,
     'menu_button_map': {},
     'last_poll_ok':     0.0,
 
@@ -81,57 +80,56 @@ bot_state: dict = {
         'gann_cycle_active': False,
         'gann_cycle_started_at': None,
         'gann_open_trades': {},
-        'lot_size': 0.05,
-        'gann_cycle_hours': 1,
-        'gann_zone_filter': 'star',  
-        'gann_entry_mode': 'touch_trend', 
-        'trend_filter_type': 'vwap',     
-        'trend_vwap_period': 100,
-        'trend_ema_period': 60,
-        'trend_timeframe': '1h',    
-        'break_even_enabled': False,
-        'gann_monitor_tfs': {tf: (tf in ['5m', '10m', '15m', '20m', '30m', '1h', '4m', '6m', '2h', '1m', '2m', '3m']) for tf in _TFS},
-        'gann_touch_margin_pts': 5,       
-        'gann_tpsl_mode': 'fixed', 
-        'gann_tp_points': 140,
-        'gann_sl_points': 110,
-        'gann_tp_per_tf': {tf: 0 for tf in _TFS},
-        'gann_sl_per_tf': {tf: 0 for tf in _TFS},
-        'gann_atr_period': 14,
-        'gann_atr_sl_mult': 1.5,
-        'gann_atr_tp_mult': 2,
     } for s in AVAILABLE_SYMBOLS},
-    
+    'gann_cycle_hours':       1,
 # ── Filter Type (star, star_fan, all) ──
-    
-    
+    'gann_zone_filter':       'star',  
+    'gann_entry_mode':        'touch_trend', 
     
     # ── Trend Filters ──
-    
-    
-    
-    
+    'trend_filter_type':      'vwap',     
+    'trend_vwap_period':      100,
+    'trend_ema_period':       60,
+    'trend_timeframe':        '1h',    
     
     # ── Trade Management ──
-    
+    'break_even_enabled':     False,
     'prot_daily_dd_usd':      220,
     'prot_daily_profit_usd':  500,
     'prot_allow_multi_tf':    True,
 
     
+    'gann_monitor_tfs':       {tf: False for tf in _TFS},
+    'gann_touch_margin_pts':  5,       
+    'gann_tpsl_mode':         'fixed', 
     
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
+    'gann_tp_points':         140,
+    'gann_sl_points':         110,
+    'gann_tp_per_tf': {
+        '1m': 0, '2m': 0, '3m': 0, '4m': 0, '5m': 0, '6m': 0,
+        '10m': 0, '15m': 0, '20m': 0, '30m': 0, '1h': 0, '2h': 0
+    },
+    'gann_sl_per_tf': {
+        '1m': 0, '2m': 0, '3m': 0, '4m': 0, '5m': 0, '6m': 0,
+        '10m': 0, '15m': 0, '20m': 0, '30m': 0, '1h': 0, '2h': 0
+    },
+    'gann_atr_period':        14,
+    'gann_atr_sl_mult':       1.5,
+    'gann_atr_tp_mult':       2,
 }
 
+bot_state['gann_monitor_tfs']['1m'] = True
+bot_state['gann_monitor_tfs']['2m'] = True
+bot_state['gann_monitor_tfs']['3m'] = True
+bot_state['gann_monitor_tfs']['5m'] = True
+bot_state['gann_monitor_tfs']['10m'] = True
+bot_state['gann_monitor_tfs']['15m'] = True
+bot_state['gann_monitor_tfs']['20m'] = True
+bot_state['gann_monitor_tfs']['30m'] = True
+bot_state['gann_monitor_tfs']['1h'] = True
+bot_state['gann_monitor_tfs']['4m'] = True
+bot_state['gann_monitor_tfs']['6m'] = True
+bot_state['gann_monitor_tfs']['2h'] = True
 
 DAM_OFF = timedelta(hours=3)
 def _utc_to_dam(dt) -> datetime:
@@ -290,18 +288,18 @@ def gann_calc_levels(symbol: str, close: float) -> list[dict]:
 
 def gann_active_levels(symbol: str) -> list[dict]:
     lv = [l for l in bot_state['symbol_state'][symbol]['gann_levels'] if l['dir'] != 'ref']
-    f = sym_state['gann_zone_filter']
+    f = bot_state['gann_zone_filter']
     if f == 'star': return [l for l in lv if l['star']]
     elif f == 'star_fan': return [l for l in lv if l['star'] or l['fan']]
     return lv
 
 def _gann_tf_tp(tf: str) -> int:
-    v = sym_state['gann_tp_per_tf'].get(tf, 0)
-    return v if v > 0 else sym_state['gann_tp_points']
+    v = bot_state['gann_tp_per_tf'].get(tf, 0)
+    return v if v > 0 else bot_state['gann_tp_points']
 
 def _gann_tf_sl(tf: str) -> int:
-    v = sym_state['gann_sl_per_tf'].get(tf, 0)
-    return v if v > 0 else sym_state['gann_sl_points']
+    v = bot_state['gann_sl_per_tf'].get(tf, 0)
+    return v if v > 0 else bot_state['gann_sl_points']
 
 def _gann_atr(candles: list, period: int) -> float | None:
     if len(candles) < period + 1: return None
@@ -318,11 +316,11 @@ def _gann_atr(candles: list, period: int) -> float | None:
 def _gann_calc_tpsl(symbol: str, entry: float, is_buy: bool, candles: list, tf: str = '') -> tuple[float, float]:
     pv = SYMBOL_INFO[symbol]['pip_value']
     prec = SYMBOL_INFO[symbol]['prec']
-    if sym_state['gann_tpsl_mode'] == 'atr':
-        atr = _gann_atr(candles, sym_state['gann_atr_period'])
+    if bot_state['gann_tpsl_mode'] == 'atr':
+        atr = _gann_atr(candles, bot_state['gann_atr_period'])
         if not atr: atr = _gann_tf_sl(tf) * pv
-        sl_dist = atr * sym_state['gann_atr_sl_mult']
-        tp_dist = atr * sym_state['gann_atr_tp_mult']
+        sl_dist = atr * bot_state['gann_atr_sl_mult']
+        tp_dist = atr * bot_state['gann_atr_tp_mult']
     else:
         sl_dist = _gann_tf_sl(tf) * pv
         tp_dist = _gann_tf_tp(tf) * pv
@@ -345,31 +343,31 @@ def _gann_fmt_levels_msg(symbol: str, close: float) -> str:
         icon = '🔴' if l['dir'] == 'up' else '🟢'
         lines.append(f"{icon} {l['price']:.2f}  {l['label']}")
         
-    f_mode = sym_state['gann_zone_filter']
+    f_mode = bot_state['gann_zone_filter']
     if f_mode == 'star': filt = '⭐ المستويات الأصلية القوية فقط'
     elif f_mode == 'star_fan': filt = '⭐🌀 القوية + الموازية للمروحة'
     else: filt = '📋 كل المستويات (مخاطرة)'
     
-    flt_trend = sym_state['trend_filter_type'].upper()
+    flt_trend = bot_state['trend_filter_type'].upper()
     if flt_trend == 'BOTH': flt_trend = 'VWAP + EMA'
     
-    mode = f'لمس مباشر + فلتر ({flt_trend}_{bot_state["trend_timeframe"].upper()})' if sym_state['gann_entry_mode'] == 'touch_trend' else 'لمس أعمى (بدون فلتر)'
+    mode = f'لمس مباشر + فلتر ({flt_trend}_{bot_state["trend_timeframe"].upper()})' if bot_state['gann_entry_mode'] == 'touch_trend' else 'لمس أعمى (بدون فلتر)'
     return (f"📐 <b>سلّم جان (المروحة) — دورة جديدة</b>\n"
             f"إغلاق H1: <b>{close:.2f}</b>\n"
-            f"مدة المراقبة: {sym_state['gann_cycle_hours']}س  |  فلتر: {filt}\nالدخول: {mode}\n\n"
+            f"مدة المراقبة: {bot_state['gann_cycle_hours']}س  |  فلتر: {filt}\nالدخول: {mode}\n\n"
             + '\n'.join(lines))
 
 async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list, reason: str, tf: str) -> None:
     try:
         price = float(candles[-1]['close'])
         tp, sl = _gann_calc_tpsl(symbol, price, is_buy, candles, tf=tf)
-        lot = sym_state['lot_size']; side = 'BUY' if is_buy else 'SELL'
+        lot = bot_state['lot_size']; side = 'BUY' if is_buy else 'SELL'
         tp_pts = _gann_tf_tp(tf); sl_pts = _gann_tf_sl(tf)
         
-        tpsl_lbl = (f"ATR({sym_state['gann_atr_period']})×{sym_state['gann_atr_sl_mult']}/{sym_state['gann_atr_tp_mult']}"
-                    if sym_state['gann_tpsl_mode'] == 'atr' else f"SL:{sl_pts}p TP:{tp_pts}p")
+        tpsl_lbl = (f"ATR({bot_state['gann_atr_period']})×{bot_state['gann_atr_sl_mult']}/{bot_state['gann_atr_tp_mult']}"
+                    if bot_state['gann_tpsl_mode'] == 'atr' else f"SL:{sl_pts}p TP:{tp_pts}p")
         
-        be_lbl = " | 🛡️ BE Active" if sym_state['break_even_enabled'] else ""
+        be_lbl = " | 🛡️ BE Active" if bot_state['break_even_enabled'] else ""
         
         trade_id = f"sim_{int(datetime.now().timestamp())}_{tf}"
         bot_state['symbol_state'][symbol]['gann_open_trades'][trade_id] = tf
@@ -462,7 +460,6 @@ def get_main_keyboard() -> dict:
     return {'inline_keyboard': [
         [{'text': '📐 محرك جان (الاستراتيجية)', 'callback_data': 'menu_gann'}],
         [{'text': '🛡️ إعدادات الحماية', 'callback_data': 'menu_protection'}],
-        [{'text': '💾 إدارة الإعدادات (Presets)', 'callback_data': 'menu_presets'}],
         [{'text': '📊 بدء الباكتيست', 'callback_data': 'menu_gann_bt'}],
     ]}
 
@@ -490,17 +487,16 @@ def get_protection_keyboard() -> dict:
     return {'inline_keyboard': rows}
 
 def get_gann_keyboard() -> dict:
+    zf   = bot_state['gann_zone_filter']
+    em   = bot_state['gann_entry_mode']
+    mg   = bot_state['gann_touch_margin_pts']
+    tpsm = bot_state['gann_tpsl_mode']
+    hrs  = bot_state['gann_cycle_hours']
     sym = bot_state['ui_selected_symbol']
-    sym_state = bot_state['symbol_state'][sym]
-    zf   = sym_state['gann_zone_filter']
-    em   = sym_state['gann_entry_mode']
-    mg   = sym_state['gann_touch_margin_pts']
-    tpsm = sym_state['gann_tpsl_mode']
-    hrs  = sym_state['gann_cycle_hours']
-    cyc  = '🟢 نشطة' if sym_state['gann_cycle_active'] else '⚫ غير نشطة'
+    cyc  = '🟢 نشطة' if bot_state['symbol_state'][sym]['gann_cycle_active'] else '⚫ غير نشطة'
     open_n = len(bot_state['symbol_state'][sym]['gann_open_trades'])
     
-    flt_type = sym_state['trend_filter_type']
+    flt_type = bot_state['trend_filter_type']
     
     # تحديث التسميات لزر الفلتر
     if zf == 'star': zf_lbl = '⭐ المستويات الأصلية القوية فقط'
@@ -514,14 +510,14 @@ def get_gann_keyboard() -> dict:
         filt_btn_lbl = "🌊 الفلتر المعتمد: (VWAP الشامل)"
         flt_name = 'VWAP'
         
-    ttf_lbl = sym_state['trend_timeframe'].upper()
+    ttf_lbl = bot_state['trend_timeframe'].upper()
     em_lbl  = f'⚡ لمس + فلتر ({flt_name}_{ttf_lbl})' if em == 'touch_trend' else '⚡ لمس أعمى (بدون فلتر)'
     tps_lbl = f'🎯 TP/SL: {"نقاط ثابتة" if tpsm == "fixed" else "حسب ATR"}'
 
-    tp = sym_state['gann_tp_points']; sl = sym_state['gann_sl_points']
-    atp = sym_state['gann_atr_tp_mult']; asp = sym_state['gann_atr_sl_mult']
-    ap  = sym_state['gann_atr_period']
-    be_lbl = "🟢 مفعل" if sym_state['break_even_enabled'] else "⚫ معطل"
+    tp = bot_state['gann_tp_points']; sl = bot_state['gann_sl_points']
+    atp = bot_state['gann_atr_tp_mult']; asp = bot_state['gann_atr_sl_mult']
+    ap  = bot_state['gann_atr_period']
+    be_lbl = "🟢 مفعل" if bot_state['break_even_enabled'] else "⚫ معطل"
     
     rows = [
         [{'text': f'📐 {sym} — دورة: {cyc}  |  صفقات: {open_n}', 'callback_data': 'noop'}],
@@ -558,13 +554,13 @@ def get_gann_keyboard() -> dict:
     ]
     
     if flt_type == 'vwap':
-        vwap_val = sym_state['trend_vwap_period']
+        vwap_val = bot_state['trend_vwap_period']
         rows.append([{'text': 'VWAP −10', 'callback_data': 'gann_dec_vwap'}, 
                      {'text': f'قيمة {ttf_lbl} VWAP: {vwap_val}', 'callback_data': 'noop'}, 
                      {'text': 'VWAP +10', 'callback_data': 'gann_inc_vwap'}])
                      
     if flt_type == 'ema':
-        ema_val = sym_state['trend_ema_period']
+        ema_val = bot_state['trend_ema_period']
         rows.append([{'text': 'EMA −10', 'callback_data': 'gann_dec_ema'}, 
                      {'text': f'قيمة {ttf_lbl} EMA: {ema_val}', 'callback_data': 'noop'}, 
                      {'text': 'EMA +10', 'callback_data': 'gann_inc_ema'}])
@@ -574,7 +570,7 @@ def get_gann_keyboard() -> dict:
         [{'text': '── فريمات التنفيذ ──', 'callback_data': 'noop'}],
     ]
     
-    tf_items = list(sym_state['gann_monitor_tfs'].items())
+    tf_items = list(bot_state['gann_monitor_tfs'].items())
     for i in range(0, len(tf_items), 4):
         rows.append([{'text': ('✅' if on else '⬜') + f' {tfk}', 'callback_data': f'gann_tf_{tfk}'} for tfk, on in tf_items[i:i+4]])
         
@@ -608,7 +604,7 @@ def get_gann_keyboard() -> dict:
 def get_gann_tpsl_tf_keyboard(sel_tf: str = '') -> dict:
     rows = [[{'text': '⚙️ TP/SL مخصص لكل فريم', 'callback_data': 'noop'}],
             [{'text': '(0 = يرجع للقيمة العامة)', 'callback_data': 'noop'}]]
-    tfs_list = list(sym_state['gann_monitor_tfs'].keys())
+    tfs_list = list(bot_state['gann_monitor_tfs'].keys())
     tf_row = []
     for tfk in tfs_list:
         icon = '👉' if tfk == sel_tf else ''
@@ -616,9 +612,9 @@ def get_gann_tpsl_tf_keyboard(sel_tf: str = '') -> dict:
         if len(tf_row) == 4: rows.append(tf_row); tf_row = []
     if tf_row: rows.append(tf_row)
     if sel_tf:
-        tp_v = sym_state['gann_tp_per_tf'].get(sel_tf, 0); sl_v = sym_state['gann_sl_per_tf'].get(sel_tf, 0)
-        eff_tp = tp_v if tp_v > 0 else sym_state['gann_tp_points']
-        eff_sl = sl_v if sl_v > 0 else sym_state['gann_sl_points']
+        tp_v = bot_state['gann_tp_per_tf'].get(sel_tf, 0); sl_v = bot_state['gann_sl_per_tf'].get(sel_tf, 0)
+        eff_tp = tp_v if tp_v > 0 else bot_state['gann_tp_points']
+        eff_sl = sl_v if sl_v > 0 else bot_state['gann_sl_points']
         rows += [
             [{'text': f'── [{sel_tf}] ──', 'callback_data': 'noop'}],
             [{'text': f'TP فعلي: {eff_tp}p {"(مخصص)" if tp_v>0 else "(عام)"}', 'callback_data': 'noop'}],
@@ -651,10 +647,10 @@ async def gann_monitor_scanner() -> None:
             if bot_state['status'] != 'RUNNING':
                 await asyncio.sleep(10); continue
 
-            flt_type = sym_state['trend_filter_type']
-            ttf = sym_state['trend_timeframe']
+            flt_type = bot_state['trend_filter_type']
+            ttf = bot_state['trend_timeframe']
             
-            enabled_tfs = [tf for tf, on in sym_state['gann_monitor_tfs'].items() if on]
+            enabled_tfs = [tf for tf, on in bot_state['gann_monitor_tfs'].items() if on]
             active_symbols = [s for s, on in bot_state['active_symbols'].items() if on]
 
             for symbol in active_symbols:
@@ -663,9 +659,9 @@ async def gann_monitor_scanner() -> None:
                     continue
 
                 macro_trend_up = None
-                if sym_state['gann_entry_mode'] == 'touch_trend':
-                    p_vwap = sym_state['trend_vwap_period'] if flt_type == 'vwap' else 0
-                    p_ema  = sym_state['trend_ema_period'] if flt_type == 'ema' else 0
+                if bot_state['gann_entry_mode'] == 'touch_trend':
+                    p_vwap = bot_state['trend_vwap_period'] if flt_type == 'vwap' else 0
+                    p_ema  = bot_state['trend_ema_period'] if flt_type == 'ema' else 0
                     max_period = max(p_vwap, p_ema, 100)
                     
                     trend_candles = await fetch_candles(symbol, ttf, count=max(max_period+10, 120))
@@ -689,19 +685,19 @@ async def gann_monitor_scanner() -> None:
                             macro_trend_up = (current_trend_close > current_ema)
 
                 levels      = gann_active_levels(symbol)
-                margin      = sym_state['gann_touch_margin_pts'] * SYMBOL_INFO[symbol]['pip_value']
+                margin      = bot_state['gann_touch_margin_pts'] * SYMBOL_INFO[symbol]['pip_value']
 
                 for tf in enabled_tfs:
                     if tf in sym_state['gann_open_trades'].values(): continue 
 
-                    need = sym_state['gann_atr_period'] + 50
+                    need = bot_state['gann_atr_period'] + 50
                     candles = await fetch_candles(symbol, tf, count=need)
                     if not candles or len(candles) < 3: continue
                     close_px = float(candles[-1]['close'])
                     live_px  = close_px 
 
                     trend_up = True
-                    if sym_state['gann_entry_mode'] == 'touch_trend':
+                    if bot_state['gann_entry_mode'] == 'touch_trend':
                         if macro_trend_up is None: continue 
                         trend_up = macro_trend_up
 
@@ -713,13 +709,13 @@ async def gann_monitor_scanner() -> None:
 
                         is_buy = (dir == 'dn')
                         
-                        if sym_state['gann_entry_mode'] == 'touch_trend':
+                        if bot_state['gann_entry_mode'] == 'touch_trend':
                             if is_buy and not trend_up: continue
                             if not is_buy and trend_up: continue
 
                         if abs(live_px - lv['price']) <= margin:
-                            if flt_type == 'vwap': flt_label = f"VWAP={sym_state['trend_vwap_period']}"
-                            elif flt_type == 'ema': flt_label = f"EMA={sym_state['trend_ema_period']}"
+                            if flt_type == 'vwap': flt_label = f"VWAP={bot_state['trend_vwap_period']}"
+                            elif flt_type == 'ema': flt_label = f"EMA={bot_state['trend_ema_period']}"
                             else: flt_label = f"VWAP+EMA"
                             
                             reason = f"لمس دعم 🟢 (مع {flt_label}_{ttf.upper()})" if is_buy else f"لمس مقاومة 🔴 (مع {flt_label}_{ttf.upper()})"
@@ -737,26 +733,26 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
     bot_state['is_backtesting'] = True
     
     fname = f"GannBT_{datetime.now(timezone.utc).strftime('%H%M%S')}.xlsx"
-    enabled_tfs = [tf for tf, on in sym_state['gann_monitor_tfs'].items() if on] or ['5m']
+    enabled_tfs = [tf for tf, on in bot_state['gann_monitor_tfs'].items() if on] or ['5m']
     active_symbols = [s for s, on in bot_state['active_symbols'].items() if on]
     if not active_symbols:
         bot_state['is_backtesting'] = False
         return
 
-    flt_type = sym_state['trend_filter_type']
-    ttf = sym_state['trend_timeframe']
+    flt_type = bot_state['trend_filter_type']
+    ttf = bot_state['trend_timeframe']
     desc_ttf = ttf.upper()
     
-    if sym_state['gann_entry_mode'] == 'touch_trend':
-        if flt_type == 'vwap': desc_mode = f"Touch(VWAP{sym_state['trend_vwap_period']}_{desc_ttf})"
-        elif flt_type == 'ema': desc_mode = f"Touch(EMA{sym_state['trend_ema_period']}_{desc_ttf})"
+    if bot_state['gann_entry_mode'] == 'touch_trend':
+        if flt_type == 'vwap': desc_mode = f"Touch(VWAP{bot_state['trend_vwap_period']}_{desc_ttf})"
+        elif flt_type == 'ema': desc_mode = f"Touch(EMA{bot_state['trend_ema_period']}_{desc_ttf})"
         else: desc_mode = f"Touch(VWAP+EMA_{desc_ttf})"
     else:
         desc_mode = "Pure Touch"
         
-    desc_be = " | 🛡️ BE" if sym_state['break_even_enabled'] else ""
+    desc_be = " | 🛡️ BE" if bot_state['break_even_enabled'] else ""
     
-    zf = sym_state['gann_zone_filter']
+    zf = bot_state['gann_zone_filter']
     if zf == 'star': desc_star = "⭐ الأصلية"
     elif zf == 'star_fan': desc_star = "⭐🌀 الأصلية والمروحة"
     else: desc_star = "📋 الكل"
@@ -772,26 +768,25 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
     try:
         delta_hours = int((end_dt - start_dt).total_seconds() / 3600)
         for symbol in active_symbols:
-            sym_state = bot_state['symbol_state'][symbol]
-            cycle_h = sym_state['gann_cycle_hours']; tpsl_mode = sym_state['gann_tpsl_mode']
-            pv  = SYMBOL_INFO[symbol]['pip_value']; lot = sym_state['lot_size']; margin = sym_state['gann_touch_margin_pts'] * pv
+            cycle_h = bot_state['gann_cycle_hours']; tpsl_mode = bot_state['gann_tpsl_mode']
+            pv  = SYMBOL_INFO[symbol]['pip_value']; lot = bot_state['lot_size']; margin = bot_state['gann_touch_margin_pts'] * pv
             cs  = SYMBOL_INFO[symbol]['contract_size'];
             prec = SYMBOL_INFO[symbol]['prec'];
 
 
             await prog.set_phase(f'جلب بيانات الترند ({desc_ttf})...')
-            max_period = max(sym_state['trend_vwap_period'], sym_state['trend_ema_period'], 100)
+            max_period = max(bot_state['trend_vwap_period'], bot_state['trend_ema_period'], 100)
             trend_count = (delta_hours * (2 if ttf == '30m' else 1)) + max_period + 10
             candles_trend = await fetch_candles(symbol, ttf, count=trend_count, end_time=end_dt)
             if not candles_trend: await prog.done(f'❌ لا توجد بيانات {desc_ttf} ضمن هذا النطاق.'); return
 
             df_trend = pd.DataFrame(candles_trend)
             if flt_type == 'vwap':
-                p_vwap = sym_state['trend_vwap_period']
+                p_vwap = bot_state['trend_vwap_period']
                 df_trend['Typical_Price'] = (df_trend['high'] + df_trend['low'] + df_trend['close']) / 3
                 df_trend['VWAP'] = (df_trend['Typical_Price'] * df_trend['volume']).rolling(window=p_vwap).sum() / df_trend['volume'].rolling(window=p_vwap).sum()
             if flt_type == 'ema':
-                p_ema = sym_state['trend_ema_period']
+                p_ema = bot_state['trend_ema_period']
                 df_trend['EMA'] = df_trend['close'].ewm(span=p_ema, adjust=False).mean()
 
             df_trend.set_index('time', inplace=True)
@@ -840,7 +835,7 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
                 levels = gann_calc_levels(symbol, close)
 
                 # تطبيق الفلتر على مستويات التداول (الدخول)
-                f_mode = sym_state['gann_zone_filter']
+                f_mode = bot_state['gann_zone_filter']
                 active_lv = [l for l in levels if l['dir'] != 'ref' and (f_mode == 'all' or (f_mode == 'star' and l['star']) or (f_mode == 'star_fan' and (l['star'] or l['fan'])))]
 
                 cycle_trades = 0; level_used = set()
@@ -848,14 +843,14 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
                 for btf, candles_m in monitor_tfs_data.items():
                     m_window = [c for c in candles_m if t_start <= c['time'] < t_end]
                     m_before = [c for c in candles_m if c['time'] < t_start]
-                    atr_val  = _gann_atr(m_before, sym_state['gann_atr_period']) if tpsl_mode == 'atr' else None
+                    atr_val  = _gann_atr(m_before, bot_state['gann_atr_period']) if tpsl_mode == 'atr' else None
 
                     for bar in m_window:
                         bar_close = float(bar['close']); bar_time = bar['time']
                         remaining_bars = [b for b in candles_m if b['time'] > bar_time]
 
                         trend_up = True
-                        if sym_state['gann_entry_mode'] == 'touch_trend':
+                        if bot_state['gann_entry_mode'] == 'touch_trend':
                             trend_time = bar_time.floor(trend_freq)
                             if trend_time in df_trend.index:
                                 val = df_trend.loc[trend_time, 'macro_trend_up']
@@ -873,7 +868,7 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
 
                             is_buy = (dir == 'dn')
 
-                            if sym_state['gann_entry_mode'] == 'touch_trend':
+                            if bot_state['gann_entry_mode'] == 'touch_trend':
                                 if is_buy and not trend_up: continue
                                 if not is_buy and trend_up: continue
 
@@ -883,7 +878,7 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
 
                             # ── إعداد صمام الأمان (Break-Even Trigger) باستخدام كافة المستويات ──
                             be_trigger_px = None
-                            if sym_state['break_even_enabled']:
+                            if bot_state['break_even_enabled']:
                                 # البحث عن أول مستوى يقابل السعر (عادة يكون مستوى ضعيف من levels الكاملة)
                                 if is_buy:
                                     higher_levels = [l['price'] for l in levels if l['price'] > entry]
@@ -894,8 +889,8 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
 
                             tf_tp = _gann_tf_tp(btf); tf_sl = _gann_tf_sl(btf)
                             if tpsl_mode == 'atr' and atr_val:
-                                sl_d = atr_val * sym_state['gann_atr_sl_mult']
-                                tp_d = atr_val * sym_state['gann_atr_tp_mult']
+                                sl_d = atr_val * bot_state['gann_atr_sl_mult']
+                                tp_d = atr_val * bot_state['gann_atr_tp_mult']
                             else:
                                                                                                                     sl_d = tf_sl * pv; tp_d = tf_tp * pv
 
@@ -1133,45 +1128,9 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
 # TELEGRAM HANDLERS
 # ─────────────────────────────────────────────────────────────
 async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
-    sym = bot_state['ui_selected_symbol']
-    sym_state = bot_state['symbol_state'][sym]
     if d == 'menu_main': await _show(chat_id, msg_id, 'القائمة الرئيسية:', get_main_keyboard())
     elif d == 'menu_main':
         await _show(chat_id, msg_id, '<b>مرحباً بك في Gold Scalper Bot v8.9</b>', get_main_keyboard())
-
-    elif d == 'menu_presets':
-        kbd = {'inline_keyboard': [
-            [{'text': '💾 حفظ كـ Preset 1', 'callback_data': 'save_preset_1'}, {'text': '📂 تحميل Preset 1', 'callback_data': 'load_preset_1'}],
-            [{'text': '💾 حفظ كـ Preset 2', 'callback_data': 'save_preset_2'}, {'text': '📂 تحميل Preset 2', 'callback_data': 'load_preset_2'}],
-            [{'text': '💾 حفظ كـ Preset 3', 'callback_data': 'save_preset_3'}, {'text': '📂 تحميل Preset 3', 'callback_data': 'load_preset_3'}],
-            [{'text': '🔙 رجوع', 'callback_data': 'menu_main'}]
-        ]}
-        await _show(chat_id, msg_id, '<b>إدارة الإعدادات (Presets):</b>\nهنا يمكنك حفظ إعدادات جميع الأزواج واستعادتها لاحقاً.', kbd)
-    elif d.startswith('save_preset_'):
-        p_num = d.split('_')[-1]
-        try:
-            with open('presets.json', 'r') as f: data = json.load(f)
-        except: data = {}
-        data[f'preset_{p_num}'] = bot_state['symbol_state']
-        with open('presets.json', 'w') as f: json.dump(data, f)
-        await send_tg_msg(f"✅ تم حفظ الإعدادات الحالية في Preset {p_num}")
-    elif d.startswith('load_preset_'):
-        p_num = d.split('_')[-1]
-        try:
-            with open('presets.json', 'r') as f: data = json.load(f)
-            if f'preset_{p_num}' in data:
-                # Load settings, but keep live data like open_trades and gann_levels untouched
-                for s_name, s_data in data[f'preset_{p_num}'].items():
-                    if s_name in bot_state['symbol_state']:
-                        for k, v in s_data.items():
-                            if k not in ['gann_levels', 'gann_level_status', 'gann_cycle_active', 'gann_open_trades', 'gann_last_h1_time', 'gann_cycle_started_at']:
-                                bot_state['symbol_state'][s_name][k] = v
-                await send_tg_msg(f"✅ تم تحميل الإعدادات من Preset {p_num} بنجاح!")
-            else:
-                await send_tg_msg("❌ لا يوجد إعدادات محفوظة في هذا الـ Preset.")
-        except Exception as e:
-            await send_tg_msg("❌ حدث خطأ أثناء التحميل.")
-
     elif d == 'menu_protection':
         await _show(chat_id, msg_id, 'إعدادات الحماية:', get_protection_keyboard())
     elif d == 'prot_toggle_multitf':
@@ -1207,36 +1166,36 @@ async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
         await send_tg_msg(_gann_fmt_levels_msg(sym, bot_state['symbol_state'][sym]['gann_close_used']))
         await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
     elif d == 'gann_toggle_entry':
-        sym_state['gann_entry_mode'] = 'pure_touch' if sym_state['gann_entry_mode'] == 'touch_trend' else 'touch_trend'
+        bot_state['gann_entry_mode'] = 'pure_touch' if bot_state['gann_entry_mode'] == 'touch_trend' else 'touch_trend'
         await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
     elif d == 'gann_toggle_filter':
-        current = sym_state['gann_zone_filter']
-        if current == 'star': sym_state['gann_zone_filter'] = 'star_fan'
-        elif current == 'star_fan': sym_state['gann_zone_filter'] = 'all'
-        else: sym_state['gann_zone_filter'] = 'star'
+        current = bot_state['gann_zone_filter']
+        if current == 'star': bot_state['gann_zone_filter'] = 'star_fan'
+        elif current == 'star_fan': bot_state['gann_zone_filter'] = 'all'
+        else: bot_state['gann_zone_filter'] = 'star'
         await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
     elif d == 'gann_toggle_filter_type':
-        current = sym_state['trend_filter_type']
-        if current == 'vwap': sym_state['trend_filter_type'] = 'ema'
-        else: sym_state['trend_filter_type'] = 'vwap'
+        current = bot_state['trend_filter_type']
+        if current == 'vwap': bot_state['trend_filter_type'] = 'ema'
+        else: bot_state['trend_filter_type'] = 'vwap'
         await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
     elif d == 'gann_toggle_ttf':
-        sym_state['trend_timeframe'] = '30m' if sym_state['trend_timeframe'] == '1h' else '1h'
+        bot_state['trend_timeframe'] = '30m' if bot_state['trend_timeframe'] == '1h' else '1h'
         await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
     elif d == 'gann_toggle_be':
-        sym_state['break_even_enabled'] = not sym_state['break_even_enabled']
+        bot_state['break_even_enabled'] = not bot_state['break_even_enabled']
         await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
     elif d == 'gann_dec_vwap': 
-        sym_state['trend_vwap_period'] = max(10, sym_state['trend_vwap_period'] - 10)
+        bot_state['trend_vwap_period'] = max(10, bot_state['trend_vwap_period'] - 10)
         await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
     elif d == 'gann_inc_vwap': 
-        sym_state['trend_vwap_period'] = min(500, sym_state['trend_vwap_period'] + 10)
+        bot_state['trend_vwap_period'] = min(500, bot_state['trend_vwap_period'] + 10)
         await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
     elif d == 'gann_dec_ema': 
-        sym_state['trend_ema_period'] = max(10, sym_state['trend_ema_period'] - 10)
+        bot_state['trend_ema_period'] = max(10, bot_state['trend_ema_period'] - 10)
         await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
     elif d == 'gann_inc_ema': 
-        sym_state['trend_ema_period'] = min(500, sym_state['trend_ema_period'] + 10)
+        bot_state['trend_ema_period'] = min(500, bot_state['trend_ema_period'] + 10)
         await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
     elif d == 'gann_filter_help':
         help_txt = ("<b>⚙️ دليل تخصيص القيم:</b>\n\n"
@@ -1250,30 +1209,30 @@ async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
                     "سيتم حفظ القيمة وتطبيقها فوراً.")
         await _show(chat_id, msg_id, help_txt, get_gann_keyboard())
     elif d == 'gann_dec_margin': 
-        sym_state['gann_touch_margin_pts'] = max(1, sym_state['gann_touch_margin_pts'] - 1)
+        bot_state['gann_touch_margin_pts'] = max(1, bot_state['gann_touch_margin_pts'] - 1)
         await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
     elif d == 'gann_inc_margin': 
-        sym_state['gann_touch_margin_pts'] = min(50, sym_state['gann_touch_margin_pts'] + 1)
+        bot_state['gann_touch_margin_pts'] = min(50, bot_state['gann_touch_margin_pts'] + 1)
         await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
     elif d == 'gann_dec_hours': 
-        sym_state['gann_cycle_hours'] = max(1, sym_state['gann_cycle_hours'] - 1)
+        bot_state['gann_cycle_hours'] = max(1, bot_state['gann_cycle_hours'] - 1)
         await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
     elif d == 'gann_inc_hours': 
-        sym_state['gann_cycle_hours'] = min(24, sym_state['gann_cycle_hours'] + 1)
+        bot_state['gann_cycle_hours'] = min(24, bot_state['gann_cycle_hours'] + 1)
         await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
     elif d == 'gann_toggle_tpsl':
-        sym_state['gann_tpsl_mode'] = 'atr' if sym_state['gann_tpsl_mode'] == 'fixed' else 'fixed'
+        bot_state['gann_tpsl_mode'] = 'atr' if bot_state['gann_tpsl_mode'] == 'fixed' else 'fixed'
         await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_dec_tp10': sym_state['gann_tp_points'] = max(10, sym_state['gann_tp_points'] - 10); await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_inc_tp10': sym_state['gann_tp_points'] = min(1000, sym_state['gann_tp_points'] + 10); await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_dec_sl10': sym_state['gann_sl_points'] = max(10, sym_state['gann_sl_points'] - 10); await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_inc_sl10': sym_state['gann_sl_points'] = min(1000, sym_state['gann_sl_points'] + 10); await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_dec_atrp':  sym_state['gann_atr_period'] = max(5,   sym_state['gann_atr_period'] - 1); await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_inc_atrp':  sym_state['gann_atr_period'] = min(50,  sym_state['gann_atr_period'] + 1); await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_dec_atrsl': sym_state['gann_atr_sl_mult'] = max(0.5, round(sym_state['gann_atr_sl_mult'] - 0.5, 1)); await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_inc_atrsl': sym_state['gann_atr_sl_mult'] = min(5.0, round(sym_state['gann_atr_sl_mult'] + 0.5, 1)); await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_dec_atrtp': sym_state['gann_atr_tp_mult'] = max(0.5, round(sym_state['gann_atr_tp_mult'] - 0.5, 1)); await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
-    elif d == 'gann_inc_atrtp': sym_state['gann_atr_tp_mult'] = min(8.0, round(sym_state['gann_atr_tp_mult'] + 0.5, 1)); await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
+    elif d == 'gann_dec_tp10': bot_state['gann_tp_points'] = max(10, bot_state['gann_tp_points'] - 10); await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
+    elif d == 'gann_inc_tp10': bot_state['gann_tp_points'] = min(1000, bot_state['gann_tp_points'] + 10); await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
+    elif d == 'gann_dec_sl10': bot_state['gann_sl_points'] = max(10, bot_state['gann_sl_points'] - 10); await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
+    elif d == 'gann_inc_sl10': bot_state['gann_sl_points'] = min(1000, bot_state['gann_sl_points'] + 10); await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
+    elif d == 'gann_dec_atrp':  bot_state['gann_atr_period'] = max(5,   bot_state['gann_atr_period'] - 1); await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
+    elif d == 'gann_inc_atrp':  bot_state['gann_atr_period'] = min(50,  bot_state['gann_atr_period'] + 1); await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
+    elif d == 'gann_dec_atrsl': bot_state['gann_atr_sl_mult'] = max(0.5, round(bot_state['gann_atr_sl_mult'] - 0.5, 1)); await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
+    elif d == 'gann_inc_atrsl': bot_state['gann_atr_sl_mult'] = min(5.0, round(bot_state['gann_atr_sl_mult'] + 0.5, 1)); await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
+    elif d == 'gann_dec_atrtp': bot_state['gann_atr_tp_mult'] = max(0.5, round(bot_state['gann_atr_tp_mult'] - 0.5, 1)); await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
+    elif d == 'gann_inc_atrtp': bot_state['gann_atr_tp_mult'] = min(8.0, round(bot_state['gann_atr_tp_mult'] + 0.5, 1)); await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
     elif d.startswith('gann_toggle_pair_'):
         pair = d[len('gann_toggle_pair_'):]
         bot_state['active_symbols'][pair] = not bot_state['active_symbols'][pair]
@@ -1284,21 +1243,21 @@ async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
         await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
     elif d.startswith('gann_tf_'):
         tfk = d[len('gann_tf_'):]
-        if tfk in sym_state['gann_monitor_tfs']: sym_state['gann_monitor_tfs'][tfk] = not sym_state['gann_monitor_tfs'][tfk]
+        if tfk in bot_state['gann_monitor_tfs']: bot_state['gann_monitor_tfs'][tfk] = not bot_state['gann_monitor_tfs'][tfk]
         await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
     elif d == 'gann_tpsl_tf': await _show(chat_id, msg_id, '⚙️ TP/SL مخصص لكل فريم:', get_gann_tpsl_tf_keyboard())
     elif d.startswith('gann_tptf_sel_'):
         sel_tf = d[len('gann_tptf_sel_'):]; await _show(chat_id, msg_id, f'⚙️ TP/SL [{sel_tf}]:', get_gann_tpsl_tf_keyboard(sel_tf))
     elif d.startswith('gann_tptf_itp_'):
-        tf = d[len('gann_tptf_itp_'):]; sym_state['gann_tp_per_tf'][tf] = sym_state['gann_tp_per_tf'].get(tf, 0) + 10; await _show(chat_id, msg_id, f'⚙️ TP/SL [{tf}]:', get_gann_tpsl_tf_keyboard(tf))
+        tf = d[len('gann_tptf_itp_'):]; bot_state['gann_tp_per_tf'][tf] = bot_state['gann_tp_per_tf'].get(tf, 0) + 10; await _show(chat_id, msg_id, f'⚙️ TP/SL [{tf}]:', get_gann_tpsl_tf_keyboard(tf))
     elif d.startswith('gann_tptf_dtp_'):
-        tf = d[len('gann_tptf_dtp_'):]; sym_state['gann_tp_per_tf'][tf] = max(0, sym_state['gann_tp_per_tf'].get(tf, 0) - 10); await _show(chat_id, msg_id, f'⚙️ TP/SL [{tf}]:', get_gann_tpsl_tf_keyboard(tf))
+        tf = d[len('gann_tptf_dtp_'):]; bot_state['gann_tp_per_tf'][tf] = max(0, bot_state['gann_tp_per_tf'].get(tf, 0) - 10); await _show(chat_id, msg_id, f'⚙️ TP/SL [{tf}]:', get_gann_tpsl_tf_keyboard(tf))
     elif d.startswith('gann_tptf_isl_'):
-        tf = d[len('gann_tptf_isl_'):]; sym_state['gann_sl_per_tf'][tf] = sym_state['gann_sl_per_tf'].get(tf, 0) + 10; await _show(chat_id, msg_id, f'⚙️ TP/SL [{tf}]:', get_gann_tpsl_tf_keyboard(tf))
+        tf = d[len('gann_tptf_isl_'):]; bot_state['gann_sl_per_tf'][tf] = bot_state['gann_sl_per_tf'].get(tf, 0) + 10; await _show(chat_id, msg_id, f'⚙️ TP/SL [{tf}]:', get_gann_tpsl_tf_keyboard(tf))
     elif d.startswith('gann_tptf_dsl_'):
-        tf = d[len('gann_tptf_dsl_'):]; sym_state['gann_sl_per_tf'][tf] = max(0, sym_state['gann_sl_per_tf'].get(tf, 0) - 10); await _show(chat_id, msg_id, f'⚙️ TP/SL [{tf}]:', get_gann_tpsl_tf_keyboard(tf))
+        tf = d[len('gann_tptf_dsl_'):]; bot_state['gann_sl_per_tf'][tf] = max(0, bot_state['gann_sl_per_tf'].get(tf, 0) - 10); await _show(chat_id, msg_id, f'⚙️ TP/SL [{tf}]:', get_gann_tpsl_tf_keyboard(tf))
     elif d.startswith('gann_tptf_rst_'):
-        tf = d[len('gann_tptf_rst_'):]; sym_state['gann_tp_per_tf'][tf] = 0; sym_state['gann_sl_per_tf'][tf] = 0; await _show(chat_id, msg_id, f'⚙️ تمت إعادة الضبط:', get_gann_tpsl_tf_keyboard(tf))
+        tf = d[len('gann_tptf_rst_'):]; bot_state['gann_tp_per_tf'][tf] = 0; bot_state['gann_sl_per_tf'][tf] = 0; await _show(chat_id, msg_id, f'⚙️ تمت إعادة الضبط:', get_gann_tpsl_tf_keyboard(tf))
     elif d == 'menu_gann_bt':
         await _show(chat_id, msg_id, 'اختر مدة الباكتيست:', get_gann_bt_keyboard())
     elif d.startswith('gbt_'):
@@ -1322,19 +1281,18 @@ async def process_tg_update(update: dict) -> None:
         
         parts = msg.lower().split()
         if parts[0] == '/set':
-            sym_state = bot_state['symbol_state'][bot_state['ui_selected_symbol']]
             if len(parts) == 3 and parts[1] in ['ema', 'vwap'] and parts[2].isdigit():
                 val = int(parts[2])
-                if parts[1] == 'ema': sym_state['trend_ema_period'] = val
-                elif parts[1] == 'vwap': sym_state['trend_vwap_period'] = val
+                if parts[1] == 'ema': bot_state['trend_ema_period'] = val
+                elif parts[1] == 'vwap': bot_state['trend_vwap_period'] = val
                 await send_tg_msg(f"✅ <b>تم التحديث بنجاح!</b>\n⚙️ {parts[1].upper()} الشامل: {val}")
                 return
             elif len(parts) == 4:
                 _, tf, param, val = parts
                 if tf in _TFS and param in ['tp', 'sl'] and val.isdigit():
                     val = int(val)
-                    if param == 'tp': sym_state['gann_tp_per_tf'][tf] = val
-                    elif param == 'sl': sym_state['gann_sl_per_tf'][tf] = val
+                    if param == 'tp': bot_state['gann_tp_per_tf'][tf] = val
+                    elif param == 'sl': bot_state['gann_sl_per_tf'][tf] = val
                     await send_tg_msg(f"✅ <b>تم التحديث بنجاح!</b>\n📌 الفريم: {tf}\n⚙️ {param.upper()}: {val}")
                     return
             await send_tg_msg("❌ <b>صيغة خاطئة!</b>\n<b>أمثلة صحيحة:</b>\n<code>/set ema 50</code>\n<code>/set vwap 100</code>\n<code>/set 5m tp 40</code>\n<code>/set 15m sl 25</code>")
