@@ -736,27 +736,32 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
     global _bt_progress
     bot_state['is_backtesting'] = True
     
+    try:
+    
     fname = f"GannBT_{datetime.now(timezone.utc).strftime('%H%M%S')}.xlsx"
-    enabled_tfs = [tf for tf, on in sym_state['gann_monitor_tfs'].items() if on] or ['5m']
+    
     active_symbols = [s for s, on in bot_state['active_symbols'].items() if on]
     if not active_symbols:
         bot_state['is_backtesting'] = False
         return
-
-    flt_type = sym_state['trend_filter_type']
-    ttf = sym_state['trend_timeframe']
+        
+    first_sym_state = bot_state['symbol_state'][active_symbols[0]]
+    
+    enabled_tfs = [tf for tf, on in first_sym_state['gann_monitor_tfs'].items() if on] or ['5m']
+    flt_type = first_sym_state['trend_filter_type']
+    ttf = first_sym_state['trend_timeframe']
     desc_ttf = ttf.upper()
     
-    if sym_state['gann_entry_mode'] == 'touch_trend':
-        if flt_type == 'vwap': desc_mode = f"Touch(VWAP{sym_state['trend_vwap_period']}_{desc_ttf})"
-        elif flt_type == 'ema': desc_mode = f"Touch(EMA{sym_state['trend_ema_period']}_{desc_ttf})"
+    if first_sym_state['gann_entry_mode'] == 'touch_trend':
+        if flt_type == 'vwap': desc_mode = f"Touch(VWAP{first_sym_state['trend_vwap_period']}_{desc_ttf})"
+        elif flt_type == 'ema': desc_mode = f"Touch(EMA{first_sym_state['trend_ema_period']}_{desc_ttf})"
         else: desc_mode = f"Touch(VWAP+EMA_{desc_ttf})"
     else:
         desc_mode = "Pure Touch"
         
-    desc_be = " | 🛡️ BE" if sym_state['break_even_enabled'] else ""
+    desc_be = " | 🛡️ BE" if first_sym_state['break_even_enabled'] else ""
     
-    zf = sym_state['gann_zone_filter']
+    zf = first_sym_state['gann_zone_filter']
     if zf == 'star': desc_star = "⭐ الأصلية"
     elif zf == 'star_fan': desc_star = "⭐🌀 الأصلية والمروحة"
     else: desc_star = "📋 الكل"
@@ -1128,7 +1133,9 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
 
     except Exception as e:
         c_log(f'BT Error: {e}'); bot_state['is_backtesting'] = False
-
+        if _bt_progress:
+            try: await _bt_progress.done(f'❌ خطأ داخلي في الباكتيست:\\n{e}')
+            except: pass
 # ─────────────────────────────────────────────────────────────
 # TELEGRAM HANDLERS
 # ─────────────────────────────────────────────────────────────
@@ -1310,6 +1317,7 @@ async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
     elif d == 'cancel_bt':
         global _bt_progress
         if _bt_progress and bot_state['is_backtesting']: await _bt_progress.cancel()
+        bot_state['is_backtesting'] = False
         await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
     else: c_log(f'Unhandled callback: {d}')
 
