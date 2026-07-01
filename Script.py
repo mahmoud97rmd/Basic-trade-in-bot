@@ -926,7 +926,12 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
         dd_limit = - float(bot_state['prot_daily_dd_usd'])
         profit_limit = float(bot_state['prot_daily_profit_usd'])
         
-        for event in all_candles_events:
+        total_events = len(all_candles_events)
+        await prog.set_tf('محاكاة عائمة', total_events)
+        
+        for i, event in enumerate(all_candles_events):
+            if i % 5000 == 0:
+                await asyncio.sleep(0)
             if prog.cancelled: break
             t = event['time']; sym = event['symbol']; h = event['high']; l = event['low']; c = event['close']
             day_str = _utc_to_dam(t).strftime('%Y-%m-%d')
@@ -1018,7 +1023,7 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
                     sig['be_activated'] = False
                     open_trades.append(sig)
                     
-            await prog.tick(signal_idx, res['win'], res['loss'], res['be'], res['total_prof'])
+            await prog.tick(i, res['win'], res['loss'], res['be'], res['total_prof'])
             
         # Post-process closed trades to match old format
         for tr in closed_trades:
@@ -1037,8 +1042,8 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
             
         res['trade_logs'].sort(key=lambda x: x['وقت الصفقة (DAM)'])
         
-        running_eq = 0.0
-        peak_eq = 0.0
+        running_eq = 5000.0
+        peak_eq = 5000.0
         max_dd = 0.0
         for t_log in res['trade_logs']:
             running_eq += t_log['ربح ($)']
