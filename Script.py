@@ -87,7 +87,7 @@ bot_state: dict = {
         'gann_cycle_hours': 1,
         'gann_zone_filter': 'star',  
         'gann_entry_mode': 'touch_trend', 
-        'trend_filter_type': 'vwap',     
+        'trend_filter_type': 'ema',     
         'trend_vwap_period': 100,
         'trend_ema_period': 60,
         'trend_timeframe': '1h',    
@@ -95,7 +95,7 @@ bot_state: dict = {
         'gann_monitor_tfs': {tf: (tf in ['5m', '10m', '15m', '20m', '30m', '1h', '4m', '6m', '2h', '1m', '2m', '3m']) for tf in _TFS},
         'gann_touch_margin_pts': 5,       
         'gann_tpsl_mode': 'fixed', 
-        'gann_tp_points': 140,
+        'gann_tp_points': 70,
         'gann_sl_points': 110,
         'gann_tp_per_tf': {tf: 0 for tf in _TFS},
         'gann_sl_per_tf': {tf: 0 for tf in _TFS},
@@ -117,7 +117,7 @@ bot_state: dict = {
     # ── Trade Management ──
     
     'prot_daily_dd_usd':      220,
-    'prot_daily_profit_usd':  500,
+    'prot_daily_profit_usd':  150,
     'prot_allow_multi_tf':    True,
 
     
