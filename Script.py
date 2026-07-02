@@ -1183,9 +1183,6 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
                 for col in range(1, 11):
                     ws_trades.cell(row=row_idx, column=col).fill = fill
 
-        ws_trades.column_dimensions['B'].width = 20
-        ws_trades.column_dimensions['E'].width = 25
-        
         ws_cycles = wb.create_sheet("دورات H1")
         ws_cycles.append(["الزوج", "الدورة (DAM)", "إغلاق H1", "عدد الصفقات", "ملاحظة"])
         for cell in ws_cycles[1]: cell.fill = gray_fill; cell.font = Font(bold=True)
@@ -1194,8 +1191,6 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
             num_trades = len([t for t in res['trade_logs'] if t['cycle_ts'] == cycle['time_ts']])
             note = f"تم تنفيذ {num_trades} صفقة" if num_trades > 0 else "لم يلمس السعر أي مستوى"
             ws_cycles.append([cycle['symbol'], _utc_to_dam(cycle['time_dt']).strftime('%Y-%m-%d %H:%M'), cycle['close'], num_trades, note])
-        ws_cycles.column_dimensions['B'].width = 20
-        ws_cycles.column_dimensions['E'].width = 30
             
         ws_susp = wb.create_sheet("أيام الإيقاف")
         ws_susp.append(["التاريخ", "السبب (النتيجة)"])
@@ -1203,6 +1198,21 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
         for d_str, rsn in suspended_days.items():
             ws_susp.append([d_str, rsn])
             
+
+        thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+        center_align = Alignment(horizontal='center', vertical='center')
+
+        for ws in [ws_trades, ws_cycles, ws_susp]:
+            for row in ws.iter_rows():
+                for cell in row:
+                    cell.border = thin_border
+                    cell.alignment = center_align
+
+        from openpyxl.utils import get_column_letter
+        for i in range(1, 11): ws_trades.column_dimensions[get_column_letter(i)].width = 22.0
+        for i in range(1, 6): ws_cycles.column_dimensions[get_column_letter(i)].width = 22.0
+        for i in range(1, 3): ws_susp.column_dimensions[get_column_letter(i)].width = 25.0
+        
         wb.save(fname)
         
         await prog.done(f'<b>باكتيست جان اكتمل ✅</b>\n{syms_label} H1→[{desc_tfs}] | {desc_mode} | {desc_star}{desc_be}\n{start_dt.strftime("%Y-%m-%d")} → {end_dt.strftime("%Y-%m-%d")}\n\nNet: {"PROFIT ▲" if res["total_prof"]>=0 else "LOSS ▼"} ${round(res["total_prof"], 2)}\nWin:  +${round(res["total_win_usd"], 2)} ({res["win"]})\nLoss: -${round(res["total_loss_usd"], 2)} ({res["loss"]})\nBreak-Even: $0.0 ({res["be"]})\nWR: {round(res["win"]/max(1, res["win"]+res["loss"])*100)}% ({len(res["trade_logs"])} صفقة)\nMax DD: ${round(res["max_dd"],2)} ({round((res["max_dd"]/max(1,res["peak_equity"]))*100)}%)\nدورات H1: {len(res["cycle_logs"])}  |  TP/SL: {"ATR" if tpsl_mode=="atr" else "نقاط ثابتة"} | Lot: {lot}\n\nإرسال ملف Excel...')
