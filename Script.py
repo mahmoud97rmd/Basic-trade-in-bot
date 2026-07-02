@@ -861,6 +861,13 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
             await prog.set_phase('جلب شموع الفريمات الصغيرة...')
             monitor_tfs_data = {}
             days_diff = (end_dt - start_dt).days or 1
+            # Always fetch 1m for high-resolution price tracking during simulation
+            need_1m = days_diff * 24 * 60 + 300
+            mc_1m = await fetch_candles(symbol, '1m', count=need_1m, end_time=end_dt)
+            if mc_1m:
+                for c in mc_1m:
+                    all_candles_events.append({'time': c['time'], 'symbol': symbol, 'high': float(c['high']), 'low': float(c['low']), 'close': float(c['close']), 'tf': '1m_track'})
+
             for btf in enabled_tfs:
                 bmin = int(''.join(filter(str.isdigit, btf)))
                 if 'h' in btf: bmin *= 60
@@ -868,6 +875,8 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
                 mc = await fetch_candles(symbol, btf, count=need_m, end_time=end_dt)
                 if mc: 
                     monitor_tfs_data[btf] = sorted(mc, key=lambda c: c['time'])
+                    # We only need to add these to events if they might trigger signals at times not covered by 1m
+                    # But 1m covers everything. Still, let's keep them in events for safety.
                     for c in mc:
                         all_candles_events.append({'time': c['time'], 'symbol': symbol, 'high': float(c['high']), 'low': float(c['low']), 'close': float(c['close']), 'tf': btf})
 
@@ -1066,9 +1075,12 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
         # Post-process closed trades to match old format
         c_log(f'BT: Post-processing {len(closed_trades)} closed trades')
         for tr in closed_trades:
-            if tr['outcome'] == 'WIN': res['win'] += 1; res['total_win_usd'] += tr['p_usd']
-            elif tr['outcome'] == 'LOSS': res['loss'] += 1; res['total_loss_usd'] += abs(tr['p_usd'])
-            elif tr['outcome'] == 'BREAK_EVEN': res['be'] += 1
+            if tr['outcome'] == 'WIN' or (tr['outcome'] == 'DAILY_LIMIT' and tr['p_usd'] > 0): 
+                res['win'] += 1; res['total_win_usd'] += tr['p_usd']
+            elif tr['outcome'] == 'LOSS' or (tr['outcome'] == 'DAILY_LIMIT' and tr['p_usd'] < 0): 
+                res['loss'] += 1; res['total_loss_usd'] += abs(tr['p_usd'])
+            elif tr['outcome'] == 'BREAK_EVEN' or (tr['outcome'] == 'DAILY_LIMIT' and tr['p_usd'] == 0): 
+                res['be'] += 1
             
             res['total_prof'] += tr['p_usd']
             dir_str = 'BUY 📈' if tr['is_buy'] else 'SELL 📉'
