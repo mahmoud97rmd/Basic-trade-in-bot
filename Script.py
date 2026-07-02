@@ -698,7 +698,36 @@ async def gann_monitor_scanner() -> None:
 
             for symbol in active_symbols:
                 sym_state = bot_state['symbol_state'][symbol]
-                
+
+                # -- Manage Open Trades --
+                if sym_state['gann_open_trades']:
+                    mc = await fetch_candles(symbol, '1m', count=2)
+                    if mc:
+                        live_px = float(mc[-1]['close'])
+                        closed_ids = []
+                        for tid, tr in sym_state['gann_open_trades'].items():
+                            is_buy = tr.get('is_buy')
+                            tp = tr.get('tp')
+                            sl = tr.get('sl')
+                            tf = tr.get('tf')
+                            
+                            outcome = None
+                            if is_buy:
+                                if live_px >= tp: outcome = 'WIN ✅'
+                                elif live_px <= sl: outcome = 'LOSS ❌'
+                            else:
+                                if live_px <= tp: outcome = 'WIN ✅'
+                                elif live_px >= sl: outcome = 'LOSS ❌'
+                                
+                            if outcome:
+                                closed_ids.append(tid)
+                                msg = f"🔔 <b>تحديث صفقة [{symbol} - جان {tf}]</b>\n\nالنتيجة: {outcome}\nسعر الإغلاق: {live_px:.2f}"
+                                if tr.get('is_real'): msg += "\n\n(الصفقة حقيقية، تم إغلاقها تلقائياً على منصتك بناءً على TP/SL)"
+                                await send_tg_msg(msg)
+                                
+                        for tid in closed_ids:
+                            del sym_state['gann_open_trades'][tid]
+
                 flt_type = sym_state['trend_filter_type']
                 ttf = sym_state['trend_timeframe']
                 enabled_tfs = [tf for tf, on in sym_state['gann_monitor_tfs'].items() if on]
