@@ -116,7 +116,7 @@ bot_state: dict = {
     
     # ── Trade Management ──
     
-    'prot_daily_dd_usd':      220,
+    'prot_daily_dd_usd':      200,
     'prot_daily_profit_usd':  150,
     'prot_allow_multi_tf':    True,
 
