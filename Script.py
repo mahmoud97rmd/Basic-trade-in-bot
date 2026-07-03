@@ -297,8 +297,11 @@ GANN_COEFS = [
 
 def gann_calc_levels(symbol: str, close: float) -> list[dict]:
     levels = []
+    anchor_tf = bot_state.get('gann_anchor_tf', '1h')
+    multiplier = GANN_TFC_H1 * 2.0 if anchor_tf == '4h' else GANN_TFC_H1
+    
     for i, item in enumerate(GANN_COEFS):
-        offset = close * item['c'] * GANN_TFC_H1
+        offset = close * item['c'] * multiplier
         prec = SYMBOL_INFO[symbol]['prec']
         up = round(close + offset, prec)
         dn = round(close - offset, prec)
@@ -370,7 +373,8 @@ def _gann_calc_tpsl(symbol: str, entry: float, is_buy: bool, candles: list, tf: 
     return round(entry - tp_dist, prec), round(entry + sl_dist, prec)
 
 async def _gann_fetch_last_closed_anchor(symbol: str) -> dict | None:
-    candles = await fetch_candles(symbol, '1h', count=2)
+    anchor_tf = bot_state.get('gann_anchor_tf', '1h')
+    candles = await fetch_candles(symbol, anchor_tf, count=2)
     if not candles: return None
     candles = sorted(candles, key=lambda c: c['time'])
     # fetch_candles already filters out incomplete (currently forming) candles!
@@ -805,34 +809,57 @@ async def gann_monitor_scanner() -> None:
                             await send_tg_msg(f"🚨 <b>إلغاء دورة {symbol}:</b> السعر تحرك بحدة! تم تجميد التداول بانتظار الدورة القادمة للحماية.")
                 
                 if sym_state['gann_open_trades']:
-                    mc = await fetch_candles(symbol, '1m', count=2)
-                    
-                    # Drawdown Blindspot Fix: Fallback to MT5 prices if Oanda fails
-                    live_px = None
-                    if not mc:
-                        if _metaapi_conn:
-                            for tid, tr in sym_state['gann_open_trades'].items():
-                                if tid in actual_positions:
-                                    live_px = actual_positions[tid].get('currentPrice')
-                                    break
-                        if live_px is None:
-                            continue # Totally blind, must skip
-                    else:
-                        candle_age = (now_dt - mc[-1]['time']).total_seconds()
-                        if bot_state.get('prot_stale_filter', True) and candle_age > 120:
-                            c_log(f"Stale data for {symbol} (age: {candle_age}s).")
-                            continue
-                        live_px = float(mc[-1]['close'])
-                        
                     # --- MetaAPI Strict Reconciliation (Per Symbol, Just-In-Time) ---
                     actual_positions = {}
+                    sync_failed = False
                     if bot_state.get('prot_true_sync', True) and _metaapi_conn:
                         try:
                             positions = await _metaapi_conn.get_positions()
                             for p in positions: actual_positions[str(p.get('id'))] = p
-                        except Exception as e: pass
+                        except Exception as e:
+                            c_log(f"MetaAPI get_positions failed: {e}")
+                            sync_failed = True
+                            
+                    if sync_failed:
+                        continue # DO NOT proceed with reconciliation or risk Amnesia Wipe
+
+                    mc = await fetch_candles(symbol, '1m', count=2)
+                    
+                    # Drawdown Blindspot Fix: Fallback to MT5 prices if Oanda fails
+                    live_px = None
+                    oanda_failed = False
+                    if not mc:
+                        oanda_failed = True
+                    else:
+                        candle_age = (now_dt - mc[-1]['time']).total_seconds()
+                        if bot_state.get('prot_stale_filter', True) and candle_age > 120:
+                            oanda_failed = True
+                    
+                    live_px = None
+                    if not oanda_failed:
+                        live_px = float(mc[-1]['close'])
+                    else:
+                        c_log(f"Oanda failed or stale for {symbol}. Falling back strictly to MetaAPI unrealizedProfit for Drawdown Evaluation.")
+                        # We cannot evaluate WIN/LOSS outcomes accurately without live_px, but we MUST calculate total_floating.
+                        for tid, tr in sym_state['gann_open_trades'].items():
+                            if tid in actual_positions:
+                                total_floating += float(actual_positions[tid].get('unrealizedProfit', 0.0))
+                        continue # Skip outcome evaluation, but total_floating is now updated!
+                        
+
 
                     closed_ids = []
+                    
+                    # Pre-fetch history if there are missing real trades to prevent DDoS
+                    history_deals_cache = None
+                    missing_tids = [t for t, v in sym_state['gann_open_trades'].items() if v.get('is_real') and t not in actual_positions]
+                    if missing_tids and _metaapi_conn:
+                        try:
+                            from datetime import timedelta
+                            start_time = datetime.now(timezone.utc) - timedelta(days=2)
+                            history_deals_cache = await _metaapi_conn.get_history_deals_by_time_range(start_time, datetime.now(timezone.utc))
+                        except Exception as e:
+                            c_log(f"Failed to pre-fetch historical deals: {e}")
                     
                     for tid, tr in list(sym_state['gann_open_trades'].items()):
                         is_buy = tr.get('is_buy')
@@ -848,23 +875,18 @@ async def gann_monitor_scanner() -> None:
                         
                         if is_real and bot_state.get('prot_true_sync', True) and _metaapi_conn:
                             if tid not in actual_positions:
-                                # Trade missing, meaning it closed. Fetch exact historical PnL
+                                # Pre-fetched history deals (outside the loop to prevent Rate Limit Suicide)
                                 exact_pnl = trade_pl # Fallback
-                                try:
-                                    from datetime import timedelta
-                                    start_time = datetime.now(timezone.utc) - timedelta(days=2)
-                                    deals = await _metaapi_conn.get_history_deals_by_time_range(start_time, datetime.now(timezone.utc))
+                                if history_deals_cache is not None:
                                     deal_pnl = 0.0
                                     found_deal = False
-                                    for d in deals:
+                                    for d in history_deals_cache:
                                         if str(d.get('positionId')) == str(tid) and d.get('entryType') == 'DEAL_ENTRY_OUT':
                                             deal_pnl += float(d.get('profit', 0)) + float(d.get('swap', 0)) + float(d.get('commission', 0))
                                             found_deal = True
                                     if found_deal:
                                         exact_pnl = deal_pnl
                                         c_log(f"Reconciliation: Exact PnL for {tid} fetched from MT5: {exact_pnl}$")
-                                except Exception as e:
-                                    c_log(f"Failed to fetch historical deals for {tid}: {e}")
                                 
                                 closed_ids.append(tid)
                                 bot_state['live_daily_realized'] += exact_pnl
@@ -888,14 +910,17 @@ async def gann_monitor_scanner() -> None:
                             if (is_buy and live_px >= entry + be_dist) or (not is_buy and live_px <= entry - be_dist):
                                 be_margin = sym_state.get('gann_atr_period', 14) * 0.1 * SYMBOL_INFO[symbol]['pip_value']
                                 net_be = (entry + be_margin) if is_buy else (entry - be_margin)
-                                tr['sl'] = net_be
-                                tr['be_activated'] = True
                                 if is_real and _metaapi_conn:
                                     try:
                                         await _metaapi_conn.modify_position(tid, stop_loss=net_be)
+                                        tr['sl'] = net_be
+                                        tr['be_activated'] = True # Only set if successful!
                                         await send_tg_msg(f"🛡️ تم تفعيل Break-Even لـ {symbol}!")
                                     except Exception as e:
                                         c_log(f"BE modify failed: {e}")
+                                else:
+                                    tr['sl'] = net_be
+                                    tr['be_activated'] = True
 
                         if outcome:
                             closed_ids.append(tid)
