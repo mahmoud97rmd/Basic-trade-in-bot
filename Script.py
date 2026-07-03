@@ -397,10 +397,12 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
                     await conn.connect()
                     await conn.wait_synchronized()
                     
+                    # MetaTrader symbols rarely have underscores, and user configured bot_state['symbol'] as XAUUSDm
+                    mt4_symbol = bot_state.get('symbol', symbol.replace('_', ''))
                     if is_buy:
-                        res = await conn.create_market_buy_order(symbol, lot, stop_loss=sl, take_profit=tp)
+                        res = await conn.create_market_buy_order(mt4_symbol, lot, stop_loss=sl, take_profit=tp)
                     else:
-                        res = await conn.create_market_sell_order(symbol, lot, stop_loss=sl, take_profit=tp)
+                        res = await conn.create_market_sell_order(mt4_symbol, lot, stop_loss=sl, take_profit=tp)
                         
                     trade_id = str(res.get('orderId', res.get('positionId', trade_id)))
                     real_msg = "\n🚀 <b>تم فتح الصفقة حقيقياً على حسابك!</b>"
