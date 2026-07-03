@@ -546,11 +546,10 @@ def get_main_keyboard() -> dict:
 def get_protection_keyboard() -> dict:
     dd = bot_state['prot_daily_dd_usd']
     profit = bot_state['prot_daily_profit_usd']
-    multi_tf = '✅ مسموح' if bot_state['prot_allow_multi_tf'] else '❌ ممنوع'
+    multi_tf = '✅ مسموح' if bot_state.get('prot_allow_multi_tf', True) else '❌ ممنوع'
     
     rows = [
-        [{'text': '── الحماية وإدارة المخاطر ──', 'callback_data': 'noop'}],
-        [{'text': f'تكرار الصفقات (Multi-TF): {multi_tf}', 'callback_data': 'prot_toggle_multitf'}],
+        [{'text': '── الحدود اليومية ──', 'callback_data': 'noop'}],
         [{'text': f'📉 أقصى تراجع يومي: ${dd}', 'callback_data': 'noop'}],
         [
             {'text': '➖ $50', 'callback_data': 'prot_dec_dd'},
@@ -558,23 +557,20 @@ def get_protection_keyboard() -> dict:
         ],
         [{'text': f'💰 هدف الربح اليومي: ${profit}', 'callback_data': 'noop'}],
         [
-            {'text': '➖ $100', 'callback_data': 'prot_dec_profit'},
-            {'text': '➕ $100', 'callback_data': 'prot_inc_profit'}
+            {'text': '➖ $50', 'callback_data': 'prot_dec_profit'},
+            {'text': '➕ $50', 'callback_data': 'prot_inc_profit'}
         ],
-        [{'text': '🔙 رجوع', 'callback_data': 'menu_main'}]
-    ]
-    return {'inline_keyboard': rows}
-
-
-def get_protection_keyboard() -> dict:
-    return {'inline_keyboard': [
+        [{'text': '── الحماية المتقدمة (v9.0) ──', 'callback_data': 'noop'}],
         [{'text': f"مزامنة MT4 (Reconciliation): {'✅' if bot_state.get('prot_true_sync', True) else '🔴'}", 'callback_data': 'tg_prot_sync'}],
         [{'text': f"إلغاء الدورة وقت الانفجار: {'✅' if bot_state.get('prot_cycle_inval', True) else '🔴'}", 'callback_data': 'tg_prot_inval'}],
         [{'text': f"BE شامل التكلفة (True Cost): {'✅' if bot_state.get('prot_cost_be', True) else '🔴'}", 'callback_data': 'tg_prot_cost'}],
         [{'text': f"فلتر البيانات المتأخرة: {'✅' if bot_state.get('prot_stale_filter', True) else '🔴'}", 'callback_data': 'tg_prot_stale'}],
         [{'text': f"إطار مرجعي للجان (Anchor): {bot_state.get('gann_anchor_tf', '1h').upper()}", 'callback_data': 'tg_prot_anchor'}],
-        [{'text': '← رجوع', 'callback_data': 'menu_gann'}]
-    ]}
+        [{'text': f'تكرار الصفقات (Multi-TF): {multi_tf}', 'callback_data': 'prot_toggle_multitf'}],
+        [{'text': '🔙 رجوع للقائمة الرئيسية', 'callback_data': 'menu_main'}],
+        [{'text': '🔙 رجوع لإعدادات جان', 'callback_data': 'menu_gann'}]
+    ]
+    return {'inline_keyboard': rows}
 
 def get_gann_keyboard() -> dict:
     sym = bot_state['ui_selected_symbol']
@@ -1554,10 +1550,10 @@ async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
         bot_state['prot_daily_dd_usd'] = min(5000, bot_state['prot_daily_dd_usd'] + 50)
         await _show(chat_id, msg_id, 'إعدادات الحماية:', get_protection_keyboard())
     elif d == 'prot_dec_profit':
-        bot_state['prot_daily_profit_usd'] = max(0, bot_state['prot_daily_profit_usd'] - 100)
+        bot_state['prot_daily_profit_usd'] = max(0, bot_state['prot_daily_profit_usd'] - 50)
         await _show(chat_id, msg_id, 'إعدادات الحماية:', get_protection_keyboard())
     elif d == 'prot_inc_profit':
-        bot_state['prot_daily_profit_usd'] = min(10000, bot_state['prot_daily_profit_usd'] + 100)
+        bot_state['prot_daily_profit_usd'] = min(10000, bot_state['prot_daily_profit_usd'] + 50)
         await _show(chat_id, msg_id, 'إعدادات الحماية:', get_protection_keyboard())
     elif d == 'menu_gann': await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
     elif d == 'menu_protection': await _show(chat_id, msg_id, '🛡️ إعدادات الحماية:', get_protection_keyboard())
