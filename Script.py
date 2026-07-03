@@ -211,6 +211,27 @@ def _utc_to_dam(dt) -> datetime:
     if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
     return dt + DAM_OFF
 
+
+# ─────────────────────────────────────────────────────────────
+# UNIFIED CORE LOGIC (V9.4)
+# ─────────────────────────────────────────────────────────────
+def core_eval_break_even(is_buy: bool, entry: float, current_px: float, pip_value: float, be_pts: int, atr_period: int, cost_be: bool) -> float | None:
+    be_dist = be_pts * pip_value
+    if (is_buy and current_px >= entry + be_dist) or (not is_buy and current_px <= entry - be_dist):
+        be_margin = (atr_period * 0.1 * pip_value) if cost_be else 0.0
+        return (entry + be_margin) if is_buy else (entry - be_margin)
+    return None
+
+def core_eval_outcome(is_buy: bool, current_px: float, tp: float, sl: float) -> str | None:
+    if is_buy:
+        if current_px >= tp: return 'WIN ✅'
+        if current_px <= sl: return 'LOSS ❌'
+    else:
+        if current_px <= tp: return 'WIN ✅'
+        if current_px >= sl: return 'LOSS ❌'
+    return None
+    
+# ─────────────────────────────────────────────────────────────
 # ─────────────────────────────────────────────────────────────
 # TELEGRAM HELPERS
 # ─────────────────────────────────────────────────────────────
@@ -947,20 +968,12 @@ async def gann_monitor_scanner() -> None:
                             else:
                                 trade_pl = actual_positions[tid].get('unrealizedProfit', trade_pl)
                         
-                        outcome = None
-                        if is_buy:
-                            if active_px >= tp: outcome = 'WIN ✅'
-                            elif active_px <= sl: outcome = 'LOSS ❌'
-                        else:
-                            if active_px <= tp: outcome = 'WIN ✅'
-                            elif active_px >= sl: outcome = 'LOSS ❌'
+                        outcome = core_eval_outcome(is_buy, active_px, tp, sl)
                             
                         if bot_state.get('prot_cost_be', True) and sym_state.get('break_even_enabled') and not tr.get('be_activated'):
                             be_pts = sym_state.get('gann_be_trigger_points', 40)
-                            be_dist = be_pts * SYMBOL_INFO[symbol]['pip_value']
-                            if (is_buy and active_px >= entry + be_dist) or (not is_buy and active_px <= entry - be_dist):
-                                be_margin = sym_state.get('gann_atr_period', 14) * 0.1 * SYMBOL_INFO[symbol]['pip_value']
-                                net_be = (entry + be_margin) if is_buy else (entry - be_margin)
+                            net_be = core_eval_break_even(is_buy, entry, active_px, SYMBOL_INFO[symbol]['pip_value'], be_pts, sym_state.get('gann_atr_period', 14), bot_state.get('prot_cost_be', True))
+                            if net_be is not None:
                                 if is_real and _metaapi_conn:
                                     try:
                                         await _metaapi_conn.modify_position(tid, stop_loss=net_be)
@@ -1384,42 +1397,36 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
                     
                     closed = False
                     tp_dist = abs(tp_px - entry)
+                    pv = SYMBOL_INFO[sym]['pip_value']
+                    be_pts = sym_state.get('gann_be_trigger_points', 40)
+                    atr_per = sym_state.get('gann_atr_period', 14)
+                    cost_be = bot_state.get('prot_cost_be', True)
+                    
+                    if not tr['be_activated'] and be_trigger_px is not None:
+                        # For BE trigger in backtest, we test against High for Buy, Low for Sell
+                        test_px = h if is_buy else l
+                        net_be = core_eval_break_even(is_buy, entry, test_px, pv, be_pts, atr_per, cost_be)
+                        if net_be is not None:
+                            tr['sl_current'] = net_be
+                            tr['be_activated'] = True
+
+                    # Outcome check uses h/l for extreme boundary testing
                     if is_buy:
                         if l <= sl_current:
                             tr['outcome'] = 'BREAK_EVEN' if sl_current > entry - 0.01 else 'LOSS'
-                            if tr['outcome'] == 'BREAK_EVEN':
-                                tr['p_usd'] = round(abs(sl_current - entry) * lot * cs * quote_conv, 2)
-                            else:
-                                tr['p_usd'] = -round(sl_d * lot * cs * quote_conv, 2)
+                            tr['p_usd'] = round(abs(sl_current - entry) * lot * cs * quote_conv, 2) if tr['outcome'] == 'BREAK_EVEN' else -round(sl_d * lot * cs * quote_conv, 2)
                             closed = True
-                        elif not tr['be_activated'] and be_trigger_px is not None:
-                            be_dist = sym_state.get('gann_be_trigger_points', 40) * SYMBOL_INFO[sym]['pip_value']
-                            if h >= (entry + be_dist if bot_state.get('prot_cost_be', True) else (entry + be_dist)):
-                                pv = SYMBOL_INFO[sym]['pip_value']
-                                be_margin = 1.4 * pv if bot_state.get('prot_cost_be', True) else 0.0
-                                tr['sl_current'] = entry + be_margin
-                                tr['be_activated'] = True
-                        if not closed and h >= tp_px:
-                            tr['outcome'] = 'WIN'
+                        elif not closed and h >= tp_px:
+                            tr['outcome'] = 'WIN ✅'
                             tr['p_usd'] = round(tr['tp_d'] * lot * cs * quote_conv, 2)
                             closed = True
                     else:
                         if h >= sl_current:
                             tr['outcome'] = 'BREAK_EVEN' if sl_current < entry + 0.01 else 'LOSS'
-                            if tr['outcome'] == 'BREAK_EVEN':
-                                tr['p_usd'] = round(abs(entry - sl_current) * lot * cs * quote_conv, 2)
-                            else:
-                                tr['p_usd'] = -round(sl_d * lot * cs * quote_conv, 2)
+                            tr['p_usd'] = round(abs(entry - sl_current) * lot * cs * quote_conv, 2) if tr['outcome'] == 'BREAK_EVEN' else -round(sl_d * lot * cs * quote_conv, 2)
                             closed = True
-                        elif not tr['be_activated'] and be_trigger_px is not None:
-                            be_dist = sym_state.get('gann_be_trigger_points', 40) * SYMBOL_INFO[sym]['pip_value']
-                            if l <= (entry - be_dist if bot_state.get('prot_cost_be', True) else (entry - be_dist)):
-                                pv = SYMBOL_INFO[sym]['pip_value']
-                                be_margin = 1.4 * pv if bot_state.get('prot_cost_be', True) else 0.0
-                                tr['sl_current'] = entry - be_margin
-                                tr['be_activated'] = True
-                        if not closed and l <= tp_px:
-                            tr['outcome'] = 'WIN'
+                        elif not closed and l <= tp_px:
+                            tr['outcome'] = 'WIN ✅'
                             tr['p_usd'] = round(tr['tp_d'] * lot * cs * quote_conv, 2)
                             closed = True
                             
