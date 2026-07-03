@@ -115,6 +115,7 @@ bot_state: dict = {
         'trend_ema_period': 60,
         'trend_timeframe': '1h',    
         'break_even_enabled': False,
+        'gann_be_trigger_points': 40,
         'gann_monitor_tfs': {tf: (tf in ['5m', '10m', '15m', '20m', '30m', '1h', '4m', '6m', '2h', '1m', '2m', '3m']) for tf in _TFS},
         'gann_touch_margin_pts': 5,       
         'gann_tpsl_mode': 'fixed', 
@@ -643,6 +644,13 @@ def get_gann_keyboard() -> dict:
         [{'text': f'⏱️ فريم الترند: {ttf_lbl}', 'callback_data': 'gann_toggle_ttf'}],
         [{'text': f'🛡️ صمام الأمان (Break-Even): {be_lbl}', 'callback_data': 'gann_toggle_be'}],
     ]
+    if sym_state.get('break_even_enabled', False):
+        be_pts = sym_state.get('gann_be_trigger_points', 40)
+        rows.append([
+            {'text': 'BE −10p', 'callback_data': 'gann_dec_be_pts'}, 
+            {'text': f'تفعيل بعد: {be_pts}p', 'callback_data': 'noop'}, 
+            {'text': 'BE +10p', 'callback_data': 'gann_inc_be_pts'}
+        ])
     
     if flt_type == 'vwap':
         vwap_val = sym_state['trend_vwap_period']
@@ -833,8 +841,9 @@ async def gann_monitor_scanner() -> None:
                             
                         # True Cost-Aware BE
                         if bot_state.get('prot_cost_be', True) and sym_state.get('break_even_enabled') and not tr.get('be_activated'):
-                            tp_dist = abs(tp - entry)
-                            if (is_buy and live_px >= entry + tp_dist*0.7) or (not is_buy and live_px <= entry - tp_dist*0.7):
+                            be_pts = sym_state.get('gann_be_trigger_points', 40)
+                            be_dist = be_pts * SYMBOL_INFO[symbol]['pip_value']
+                            if (is_buy and live_px >= entry + be_dist) or (not is_buy and live_px <= entry - be_dist):
                                 be_margin = sym_state.get('gann_atr_period', 14) * 0.1 * SYMBOL_INFO[symbol]['pip_value']
                                 net_be = (entry + be_margin) if is_buy else (entry - be_margin)
                                 tr['sl'] = net_be
@@ -1262,7 +1271,8 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
                                 tr['p_usd'] = -round(sl_d * lot * cs * quote_conv, 2)
                             closed = True
                         elif not tr['be_activated'] and be_trigger_px is not None:
-                            if h >= (entry + tp_dist * 0.7 if bot_state.get('prot_cost_be', True) else (entry + tp_dist * 0.5)):
+                            be_dist = sym_state.get('gann_be_trigger_points', 40) * SYMBOL_INFO[sym]['pip_value']
+                            if h >= (entry + be_dist if bot_state.get('prot_cost_be', True) else (entry + be_dist)):
                                 pv = SYMBOL_INFO[sym]['pip_value']
                                 be_margin = 1.4 * pv if bot_state.get('prot_cost_be', True) else 0.0
                                 tr['sl_current'] = entry + be_margin
@@ -1280,7 +1290,8 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
                                 tr['p_usd'] = -round(sl_d * lot * cs * quote_conv, 2)
                             closed = True
                         elif not tr['be_activated'] and be_trigger_px is not None:
-                            if l <= (entry - tp_dist * 0.7 if bot_state.get('prot_cost_be', True) else (entry - tp_dist * 0.5)):
+                            be_dist = sym_state.get('gann_be_trigger_points', 40) * SYMBOL_INFO[sym]['pip_value']
+                            if l <= (entry - be_dist if bot_state.get('prot_cost_be', True) else (entry - be_dist)):
                                 pv = SYMBOL_INFO[sym]['pip_value']
                                 be_margin = 1.4 * pv if bot_state.get('prot_cost_be', True) else 0.0
                                 tr['sl_current'] = entry - be_margin
@@ -1617,6 +1628,12 @@ async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
         await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
     elif d == 'gann_toggle_be':
         sym_state['break_even_enabled'] = not sym_state['break_even_enabled']
+        await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
+    elif d == 'gann_dec_be_pts':
+        sym_state['gann_be_trigger_points'] = max(10, sym_state.get('gann_be_trigger_points', 40) - 10)
+        await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
+    elif d == 'gann_inc_be_pts':
+        sym_state['gann_be_trigger_points'] = min(200, sym_state.get('gann_be_trigger_points', 40) + 10)
         await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
     elif d == 'gann_dec_vwap': 
         sym_state['trend_vwap_period'] = max(10, sym_state['trend_vwap_period'] - 10)
