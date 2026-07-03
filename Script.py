@@ -70,6 +70,9 @@ bot_state: dict = {
     
     'menu_button_map': {},
     'last_poll_ok':     0.0,
+    'live_daily_realized': 0.0,
+    'live_daily_date': None,
+    'live_daily_hit': False,
 
     # ── Gann Levels Engine ──
     'active_symbols': {s: (s == 'XAU_USD') for s in AVAILABLE_SYMBOLS},
@@ -698,12 +701,26 @@ async def gann_monitor_scanner() -> None:
             if bot_state['status'] != 'RUNNING':
                 await asyncio.sleep(10); continue
 
+            now_dt = datetime.now(timezone.utc)
+            today_date = now_dt.date()
+            if bot_state.get('live_daily_date') != today_date:
+                bot_state['live_daily_date'] = today_date
+                bot_state['live_daily_realized'] = 0.0
+                bot_state['live_daily_hit'] = False
+                c_log(f"Daily limits reset for {today_date}")
+                
+            if bot_state.get('live_daily_hit'):
+                await asyncio.sleep(60)
+                continue
+                
             active_symbols = [s for s, on in bot_state['active_symbols'].items() if on]
-
+            
+            total_floating = 0.0
+            total_realized = bot_state.get('live_daily_realized', 0.0)
+            
+            # --- First pass: track open trades and calculate floating ---
             for symbol in active_symbols:
                 sym_state = bot_state['symbol_state'][symbol]
-
-                # -- Manage Open Trades --
                 if sym_state['gann_open_trades']:
                     mc = await fetch_candles(symbol, '1m', count=2)
                     if mc:
@@ -713,7 +730,13 @@ async def gann_monitor_scanner() -> None:
                             is_buy = tr.get('is_buy')
                             tp = tr.get('tp')
                             sl = tr.get('sl')
+                            entry = tr.get('entry')
                             tf = tr.get('tf')
+                            
+                            diff = (live_px - entry) if is_buy else (entry - live_px)
+                            cs = SYMBOL_INFO[symbol]['contract_size']
+                            quote_conv = 1.0
+                            trade_pl = round(diff * sym_state['lot_size'] * cs * quote_conv, 2)
                             
                             outcome = None
                             if is_buy:
@@ -725,12 +748,47 @@ async def gann_monitor_scanner() -> None:
                                 
                             if outcome:
                                 closed_ids.append(tid)
-                                msg = f"🔔 <b>تحديث صفقة [{symbol} - جان {tf}]</b>\n\nالنتيجة: {outcome}\nسعر الإغلاق: {live_px:.2f}"
+                                bot_state['live_daily_realized'] += trade_pl
+                                msg = f"🔔 <b>تحديث صفقة [{symbol} - جان {tf}]</b>\n\nالنتيجة: {outcome} ({trade_pl}$)\nسعر الإغلاق: {live_px:.2f}"
                                 if tr.get('is_real'): msg += "\n\n(الصفقة حقيقية، تم إغلاقها تلقائياً على منصتك بناءً على TP/SL)"
                                 await send_tg_msg(msg)
+                            else:
+                                total_floating += trade_pl
                                 
                         for tid in closed_ids:
                             del sym_state['gann_open_trades'][tid]
+
+            # --- Evaluate Daily Limits ---
+            total_daily = bot_state['live_daily_realized'] + total_floating
+            dd_limit = -float(bot_state.get('prot_daily_dd_usd', 220))
+            profit_limit = float(bot_state.get('prot_daily_profit_usd', 150))
+            
+            if (dd_limit < 0 and total_daily <= dd_limit) or (profit_limit > 0 and total_daily >= profit_limit):
+                bot_state['live_daily_hit'] = True
+                limit_type = '🛑 تراجع عائم' if total_daily <= dd_limit else '✅ هدف يومي عائم'
+                await send_tg_msg(f"{limit_type} تم الوصول إليه! ({total_daily:.2f}$)\nسيتم إغلاق جميع الصفقات المفتوحة وإيقاف التداول لهذا اليوم.")
+                
+                # Close all open trades internally AND via MetaAPI if real
+                for symbol in active_symbols:
+                    sym_state = bot_state['symbol_state'][symbol]
+                    for tid, tr in list(sym_state['gann_open_trades'].items()):
+                        if tr.get('is_real'):
+                            try:
+                                api = MetaApi(METAAPI_TOKEN)
+                                account = await api.metatrader_account_api.get_account(ACCOUNT_ID)
+                                conn = account.get_rpc_connection()
+                                await conn.connect()
+                                await conn.wait_synchronized()
+                                await conn.close_position(tid)
+                                await send_tg_msg(f"✅ <b>تم إغلاق صفقة {symbol} (حقيقية) آلياً لحماية الحساب!</b>")
+                            except Exception as e:
+                                await send_tg_msg(f"⚠️ <b>تنبيه عاجل:</b> فشل البوت في إغلاق صفقة {symbol} آلياً ({e}). <b>يرجى إغلاقها يدوياً من منصتك فوراً!</b>")
+                        del sym_state['gann_open_trades'][tid]
+                        
+                continue # Skip new trades
+                
+            for symbol in active_symbols:
+                sym_state = bot_state['symbol_state'][symbol]
 
                 flt_type = sym_state['trend_filter_type']
                 ttf = sym_state['trend_timeframe']
