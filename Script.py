@@ -630,6 +630,7 @@ def get_gann_keyboard() -> dict:
     rows += [
         [{'text': '── إعدادات عامة ──', 'callback_data': 'noop'}],
         [{'text': '−ساعة', 'callback_data': 'gann_dec_hours'}, {'text': f'مدة تجميد السلّم: {hrs} ساعة', 'callback_data': 'noop'}, {'text': '+ساعة', 'callback_data': 'gann_inc_hours'}],
+        [{'text': 'Lot −0.01', 'callback_data': 'gann_dec_lot'}, {'text': f'حجم اللوت: {sym_state["lot_size"]}', 'callback_data': 'noop'}, {'text': 'Lot +0.01', 'callback_data': 'gann_inc_lot'}],
         [{'text': 'Margin −1', 'callback_data': 'gann_dec_margin'}, {'text': f'هامش اللمس {mg}p', 'callback_data': 'noop'}, {'text': 'Margin +1', 'callback_data': 'gann_inc_margin'}],
         [{'text': '── TP / SL ──', 'callback_data': 'noop'}],
         [{'text': tps_lbl, 'callback_data': 'gann_toggle_tpsl'}],
