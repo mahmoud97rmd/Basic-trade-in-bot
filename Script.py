@@ -1139,8 +1139,14 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
                             if macro_trend_up is None: continue
                             trend_up = macro_trend_up
 
+                        if bot_state.get('prot_cycle_inval', True):
+                            inval_pts = bot_state.get('prot_cycle_inval_pts', 200) * pv
+                            if abs(bar_close - close) > inval_pts:
+                                active_lv = [] # Wipe levels for the rest of this cycle on this TF
+                                break
+                                
                         for lv in active_lv:
-                            k = lv['key']; dir = lv['dir']; combo_key = f'{k}_{btf}' if bot_state['prot_allow_multi_tf'] else k
+                            k = lv['key']; dir = lv['dir']; combo_key = f'{k}_{btf}' if bot_state.get('prot_allow_multi_tf', True) else k
                             if combo_key in level_used: continue
                             is_buy = (dir == 'dn')
                             if sym_state['gann_entry_mode'] == 'touch_trend':
@@ -1151,12 +1157,7 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
                             entry = lv['price']
                             be_trigger_px = None
                             if sym_state['break_even_enabled']:
-                                if is_buy:
-                                    hl = [l['price'] for l in levels if l['price'] > entry]
-                                    if hl: be_trigger_px = min(hl)
-                                else:
-                                    ll = [l['price'] for l in levels if l['price'] < entry]
-                                    if ll: be_trigger_px = max(ll)
+                                be_trigger_px = 'dynamic'
 
                             tf_tp = _gann_tf_tp(symbol, btf); tf_sl = _gann_tf_sl(symbol, btf)
                             if tpsl_mode == 'atr' and atr_val:
@@ -1251,27 +1252,40 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
                     lot = tr['lot']; cs = tr['cs']; quote_conv = tr['quote_conv']
                     
                     closed = False
+                    tp_dist = abs(tp_px - entry)
                     if is_buy:
                         if l <= sl_current:
-                            tr['outcome'] = 'BREAK_EVEN' if sl_current == entry else 'LOSS'
-                            tr['p_usd'] = 0.0 if sl_current == entry else -round(sl_d * lot * cs * quote_conv, 2)
+                            tr['outcome'] = 'BREAK_EVEN' if sl_current > entry - 0.01 else 'LOSS'
+                            if tr['outcome'] == 'BREAK_EVEN':
+                                tr['p_usd'] = round(abs(sl_current - entry) * lot * cs * quote_conv, 2)
+                            else:
+                                tr['p_usd'] = -round(sl_d * lot * cs * quote_conv, 2)
                             closed = True
-                        elif not tr['be_activated'] and be_trigger_px is not None and h >= be_trigger_px:
-                            tr['sl_current'] = entry
-                            tr['be_activated'] = True
-                        elif h >= tp_px:
+                        elif not tr['be_activated'] and be_trigger_px is not None:
+                            if h >= (entry + tp_dist * 0.7 if bot_state.get('prot_cost_be', True) else (entry + tp_dist * 0.5)):
+                                pv = SYMBOL_INFO[sym]['pip_value']
+                                be_margin = 1.4 * pv if bot_state.get('prot_cost_be', True) else 0.0
+                                tr['sl_current'] = entry + be_margin
+                                tr['be_activated'] = True
+                        if not closed and h >= tp_px:
                             tr['outcome'] = 'WIN'
                             tr['p_usd'] = round(tr['tp_d'] * lot * cs * quote_conv, 2)
                             closed = True
                     else:
                         if h >= sl_current:
-                            tr['outcome'] = 'BREAK_EVEN' if sl_current == entry else 'LOSS'
-                            tr['p_usd'] = 0.0 if sl_current == entry else -round(sl_d * lot * cs * quote_conv, 2)
+                            tr['outcome'] = 'BREAK_EVEN' if sl_current < entry + 0.01 else 'LOSS'
+                            if tr['outcome'] == 'BREAK_EVEN':
+                                tr['p_usd'] = round(abs(entry - sl_current) * lot * cs * quote_conv, 2)
+                            else:
+                                tr['p_usd'] = -round(sl_d * lot * cs * quote_conv, 2)
                             closed = True
-                        elif not tr['be_activated'] and be_trigger_px is not None and l <= be_trigger_px:
-                            tr['sl_current'] = entry
-                            tr['be_activated'] = True
-                        elif l <= tp_px:
+                        elif not tr['be_activated'] and be_trigger_px is not None:
+                            if l <= (entry - tp_dist * 0.7 if bot_state.get('prot_cost_be', True) else (entry - tp_dist * 0.5)):
+                                pv = SYMBOL_INFO[sym]['pip_value']
+                                be_margin = 1.4 * pv if bot_state.get('prot_cost_be', True) else 0.0
+                                tr['sl_current'] = entry - be_margin
+                                tr['be_activated'] = True
+                        if not closed and l <= tp_px:
                             tr['outcome'] = 'WIN'
                             tr['p_usd'] = round(tr['tp_d'] * lot * cs * quote_conv, 2)
                             closed = True
