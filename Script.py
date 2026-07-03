@@ -369,7 +369,7 @@ def _gann_calc_tpsl(symbol: str, entry: float, is_buy: bool, candles: list, tf: 
     if is_buy: return round(entry + tp_dist, prec), round(entry - sl_dist, prec)
     return round(entry - tp_dist, prec), round(entry + sl_dist, prec)
 
-async def _gann_fetch_last_closed_h1(symbol: str) -> dict | None:
+async def _gann_fetch_last_closed_anchor(symbol: str) -> dict | None:
     candles = await fetch_candles(symbol, '1h', count=2)
     if not candles: return None
     candles = sorted(candles, key=lambda c: c['time'])
@@ -745,10 +745,12 @@ async def _close_metaapi_trade(symbol: str, tid: str, sym_state: dict):
     if not _metaapi_conn: return
     try:
         await _metaapi_conn.close_position(tid)
-        await send_tg_msg(f"✅ <b>تم إغلاق صفقة {symbol} (حقيقية) بنجاح موازياً لحماية الحساب!</b>")
+        await send_tg_msg(f"✅ <b>تم إغلاق صفقة {symbol} (حقيقية) بنجاح لحماية الحساب!</b>")
         if tid in sym_state['gann_open_trades']:
             del sym_state['gann_open_trades'][tid]
     except Exception as e:
+        import traceback
+        c_log("Closure failed for " + str(tid) + " : " + traceback.format_exc())
         await send_tg_msg(f"⚠️ <b>فشل الإغلاق الآلي:</b> صفقة {symbol} (خطأ: {e})")
 
 async def gann_monitor_scanner() -> None:
@@ -757,6 +759,19 @@ async def gann_monitor_scanner() -> None:
         try:
             if bot_state['status'] != 'RUNNING':
                 await asyncio.sleep(10); continue
+
+            # MT5 Zombie Singleton Heartbeat
+            if _metaapi_account and _metaapi_account.connection_status != 'CONNECTED':
+                c_log("MetaAPI connection lost. Attempting robust reconnect...")
+                for attempt in range(5):
+                    try:
+                        await _metaapi_conn.connect()
+                        await _metaapi_conn.wait_synchronized()
+                        c_log("MetaAPI Reconnected successfully.")
+                        break
+                    except Exception as e:
+                        c_log(f"MetaAPI reconnect failed: {e}")
+                        await asyncio.sleep(2 ** attempt)
 
             now_dt = datetime.now(timezone.utc)
             today_date = now_dt.date()
@@ -773,19 +788,10 @@ async def gann_monitor_scanner() -> None:
             active_symbols = [s for s, on in bot_state['active_symbols'].items() if on]
             total_floating = 0.0
             
-            # --- MetaAPI Reconciliation ---
-            actual_positions = {}
-            if bot_state.get('prot_true_sync', True) and _metaapi_conn:
-                try:
-                    positions = await _metaapi_conn.get_positions()
-                    for p in positions: actual_positions[str(p.get('id'))] = p
-                except Exception as e: pass
-            
             # --- First pass: track open trades ---
             for symbol in active_symbols:
                 sym_state = bot_state['symbol_state'][symbol]
                 
-                # Check Cycle Invalidation (Frozen Gann Levels)
                 if bot_state.get('prot_cycle_inval', True) and sym_state.get('gann_close_used'):
                     mc = await fetch_candles(symbol, '1m', count=1)
                     if mc:
@@ -800,15 +806,32 @@ async def gann_monitor_scanner() -> None:
                 
                 if sym_state['gann_open_trades']:
                     mc = await fetch_candles(symbol, '1m', count=2)
-                    if not mc: continue
                     
-                    # Stale Data Filter
-                    candle_age = (now_dt - mc[-1]['time']).total_seconds()
-                    if bot_state.get('prot_stale_filter', True) and candle_age > 120:
-                        c_log(f"Stale data for {symbol} (age: {candle_age}s), skipping.")
-                        continue
+                    # Drawdown Blindspot Fix: Fallback to MT5 prices if Oanda fails
+                    live_px = None
+                    if not mc:
+                        if _metaapi_conn:
+                            for tid, tr in sym_state['gann_open_trades'].items():
+                                if tid in actual_positions:
+                                    live_px = actual_positions[tid].get('currentPrice')
+                                    break
+                        if live_px is None:
+                            continue # Totally blind, must skip
+                    else:
+                        candle_age = (now_dt - mc[-1]['time']).total_seconds()
+                        if bot_state.get('prot_stale_filter', True) and candle_age > 120:
+                            c_log(f"Stale data for {symbol} (age: {candle_age}s).")
+                            continue
+                        live_px = float(mc[-1]['close'])
                         
-                    live_px = float(mc[-1]['close'])
+                    # --- MetaAPI Strict Reconciliation (Per Symbol, Just-In-Time) ---
+                    actual_positions = {}
+                    if bot_state.get('prot_true_sync', True) and _metaapi_conn:
+                        try:
+                            positions = await _metaapi_conn.get_positions()
+                            for p in positions: actual_positions[str(p.get('id'))] = p
+                        except Exception as e: pass
+
                     closed_ids = []
                     
                     for tid, tr in list(sym_state['gann_open_trades'].items()):
@@ -825,8 +848,28 @@ async def gann_monitor_scanner() -> None:
                         
                         if is_real and bot_state.get('prot_true_sync', True) and _metaapi_conn:
                             if tid not in actual_positions:
+                                # Trade missing, meaning it closed. Fetch exact historical PnL
+                                exact_pnl = trade_pl # Fallback
+                                try:
+                                    from datetime import timedelta
+                                    start_time = datetime.now(timezone.utc) - timedelta(days=2)
+                                    deals = await _metaapi_conn.get_history_deals_by_time_range(start_time, datetime.now(timezone.utc))
+                                    deal_pnl = 0.0
+                                    found_deal = False
+                                    for d in deals:
+                                        if str(d.get('positionId')) == str(tid) and d.get('entryType') == 'DEAL_ENTRY_OUT':
+                                            deal_pnl += float(d.get('profit', 0)) + float(d.get('swap', 0)) + float(d.get('commission', 0))
+                                            found_deal = True
+                                    if found_deal:
+                                        exact_pnl = deal_pnl
+                                        c_log(f"Reconciliation: Exact PnL for {tid} fetched from MT5: {exact_pnl}$")
+                                except Exception as e:
+                                    c_log(f"Failed to fetch historical deals for {tid}: {e}")
+                                
                                 closed_ids.append(tid)
-                                bot_state['live_daily_realized'] += trade_pl
+                                bot_state['live_daily_realized'] += exact_pnl
+                                msg = f"🔔 <b>مزامنة: إغلاق صفقة [{symbol} - {tf}]</b>\nالربح الفعلي (MT5): {exact_pnl:.2f}$"
+                                await send_tg_msg(msg)
                                 continue
                             else:
                                 trade_pl = actual_positions[tid].get('unrealizedProfit', trade_pl)
@@ -839,7 +882,6 @@ async def gann_monitor_scanner() -> None:
                             if live_px <= tp: outcome = 'WIN ✅'
                             elif live_px >= sl: outcome = 'LOSS ❌'
                             
-                        # True Cost-Aware BE
                         if bot_state.get('prot_cost_be', True) and sym_state.get('break_even_enabled') and not tr.get('be_activated'):
                             be_pts = sym_state.get('gann_be_trigger_points', 40)
                             be_dist = be_pts * SYMBOL_INFO[symbol]['pip_value']
@@ -851,8 +893,9 @@ async def gann_monitor_scanner() -> None:
                                 if is_real and _metaapi_conn:
                                     try:
                                         await _metaapi_conn.modify_position(tid, stop_loss=net_be)
-                                        await send_tg_msg(f"🛡️ تم تفعيل Break-Even شامل التكلفة لـ {symbol}!")
-                                    except Exception as e: pass
+                                        await send_tg_msg(f"🛡️ تم تفعيل Break-Even لـ {symbol}!")
+                                    except Exception as e:
+                                        c_log(f"BE modify failed: {e}")
 
                         if outcome:
                             closed_ids.append(tid)
@@ -866,7 +909,7 @@ async def gann_monitor_scanner() -> None:
                         if tid in sym_state['gann_open_trades']:
                             del sym_state['gann_open_trades'][tid]
 
-            # --- Evaluate Daily Limits (Race Condition Fix) ---
+            # --- Evaluate Daily Limits ---
             total_daily = bot_state['live_daily_realized'] + total_floating
             dd_limit = -float(bot_state.get('prot_daily_dd_usd', 220))
             profit_limit = float(bot_state.get('prot_daily_profit_usd', 150))
@@ -874,17 +917,17 @@ async def gann_monitor_scanner() -> None:
             if (dd_limit < 0 and total_daily <= dd_limit) or (profit_limit > 0 and total_daily >= profit_limit):
                 bot_state['live_daily_hit'] = True
                 limit_type = '🛑 تراجع عائم' if total_daily <= dd_limit else '✅ هدف يومي عائم'
-                await send_tg_msg(f"{limit_type} تم الوصول إليه! ({total_daily:.2f}$)\nسيتم إغلاق جميع الصفقات المفتوحة موازياً وإيقاف التداول.")
+                await send_tg_msg(f"{limit_type} تم الوصول إليه! ({total_daily:.2f}$)\nسيتم إغلاق جميع الصفقات المفتوحة بالتسلسل.")
                 
-                coros = []
+                # Serial MT5 Closure to avoid race conditions
                 for symbol in active_symbols:
                     sym_state = bot_state['symbol_state'][symbol]
                     for tid, tr in list(sym_state['gann_open_trades'].items()):
                         if tr.get('is_real') and _metaapi_conn:
-                            coros.append(_close_metaapi_trade(symbol, tid, sym_state))
+                            await _close_metaapi_trade(symbol, tid, sym_state)
+                            await asyncio.sleep(0.5) # Micro-delay for MT5
                         else:
                             del sym_state['gann_open_trades'][tid]
-                if coros: await asyncio.gather(*coros)
                 continue
 
             for symbol in active_symbols:
@@ -1594,7 +1637,7 @@ async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
         sym = bot_state['ui_selected_symbol']
         if not bot_state['symbol_state'][sym]['gann_levels'] or not bot_state['symbol_state'][sym]['gann_close_used']:
             await send_tg_msg(f'⏳ لا يوجد سلّم نشط لـ {sym}، جاري جلب آخر شمعة H1...')
-            last_h1 = await _gann_fetch_last_closed_h1(sym)
+            last_h1 = await _gann_fetch_last_closed_anchor(sym)
             if last_h1:
                 h1_close = float(last_h1['close'])
                 bot_state['symbol_state'][sym]['gann_levels']          = gann_calc_levels(sym, h1_close)
