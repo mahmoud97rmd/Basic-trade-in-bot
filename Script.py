@@ -78,7 +78,14 @@ async def init_metaapi():
         c_log(f"MetaAPI Init Error: {e}")
     load_bot_persistence()
 
+import os
 import json
+
+DATA_DIR = os.environ.get('PERSISTENT_DATA_PATH', '/app/data')
+os.makedirs(DATA_DIR, exist_ok=True)
+PERSISTENCE_FILE = os.path.join(DATA_DIR, 'bot_persistence.json')
+TEMP_PERSISTENCE_FILE = os.path.join(DATA_DIR, 'bot_persistence.tmp')
+
 def save_bot_persistence():
     try:
         data = {
@@ -87,14 +94,15 @@ def save_bot_persistence():
             'live_daily_hit': bot_state.get('live_daily_hit', False),
             'gann_open_trades': {sym: bot_state['symbol_state'][sym]['gann_open_trades'] for sym in bot_state['active_symbols']}
         }
-        with open('/root/tr/bot_persistence.json', 'w') as f:
+        with open(TEMP_PERSISTENCE_FILE, 'w') as f:
             json.dump(data, f)
+        os.replace(TEMP_PERSISTENCE_FILE, PERSISTENCE_FILE)
     except Exception as e:
         c_log(f"Persistence Save Error: {e}")
 
 def load_bot_persistence():
     try:
-        with open('/root/tr/bot_persistence.json', 'r') as f:
+        with open(PERSISTENCE_FILE, 'r') as f:
             data = json.load(f)
         bot_state['live_daily_realized'] = data.get('live_daily_realized', 0.0)
         bot_state['live_daily_hit'] = data.get('live_daily_hit', False)
@@ -819,13 +827,7 @@ async def gann_monitor_scanner() -> None:
                         await asyncio.sleep(2 ** attempt)
 
             now_dt = datetime.now(timezone.utc)
-            today_date = now_dt.date()
-            if bot_state.get('live_daily_date') != today_date:
-                bot_state['live_daily_date'] = today_date
-                bot_state['live_daily_realized'] = 0.0
-                bot_state['live_daily_hit'] = False
-                c_log(f"Daily limits reset for {today_date}")
-                
+            
             if bot_state.get('live_daily_hit'):
                 await asyncio.sleep(60)
                 continue
@@ -910,7 +912,14 @@ async def gann_monitor_scanner() -> None:
                             if tid in actual_positions:
                                 active_px = float(actual_positions[tid].get('currentPrice', entry))
                             else:
-                                active_px = entry # Trade might be missing
+                                active_px = tr.get('last_known_px') # Use last known, never artificially force entry
+                                
+                        if active_px is None:
+                            # Completely blind, skip risk evaluation for this specific trade to avoid corrupting limits
+                            continue
+                            
+                        tr['last_known_px'] = active_px
+                        
                         diff = (active_px - entry) if is_buy else (entry - active_px)
                         cs = SYMBOL_INFO[symbol]['contract_size']
                         trade_pl = round(diff * sym_state['lot_size'] * cs, 2)
