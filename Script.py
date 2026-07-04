@@ -160,7 +160,27 @@ os.makedirs(DATA_DIR, exist_ok=True)
 PERSISTENCE_FILE = os.path.join(DATA_DIR, 'bot_persistence.json')
 TEMP_PERSISTENCE_FILE = os.path.join(DATA_DIR, 'bot_persistence.tmp')
 
-def save_bot_persistence():
+# Event-loop I/O offloading (v9.5): json.dump + os.fsync + os.replace are
+# blocking syscalls. Calling them directly from async code stalls the
+# ENTIRE event loop for their duration -- every other coroutine (candle
+# fetches, BE checks, Telegram alerts, callback handling) waits behind a
+# single disk write. The fix: build the snapshot synchronously (cheap,
+# pure in-memory dict work, no yield point, so it's still atomic w.r.t.
+# bot_state), then push the actual disk I/O to a worker thread via
+# asyncio.to_thread and await it there. Writes are additionally serialized
+# with an asyncio.Lock so two saves in flight can't interleave writes to
+# the shared .tmp path before either os.replace runs.
+_persistence_write_lock = asyncio.Lock()
+
+def _write_persistence_file_sync(data: dict) -> None:
+    """Pure blocking I/O, no bot_state access -- safe to run in a thread."""
+    with open(TEMP_PERSISTENCE_FILE, 'w') as f:
+        json.dump(data, f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(TEMP_PERSISTENCE_FILE, PERSISTENCE_FILE)
+
+async def save_bot_persistence() -> None:
     """Atomic write: full operational state, not just open trades, so a
     hard restart can reconstruct the bot's world exactly, including
     in-progress Gann cycles and used levels."""
@@ -185,16 +205,18 @@ def save_bot_persistence():
             'connection_state': bot_state.get('connection_state', CONN_RUNNING),
             'symbol_state': symbol_snapshot,
         }
-        with open(TEMP_PERSISTENCE_FILE, 'w') as f:
-            json.dump(data, f)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(TEMP_PERSISTENCE_FILE, PERSISTENCE_FILE)
+    except Exception as e:
+        log_exception("save_bot_persistence (snapshot phase)", e)
+        return
+
+    try:
+        async with _persistence_write_lock:
+            await asyncio.to_thread(_write_persistence_file_sync, data)
     except Exception as e:
         # Persistence failing is itself a critical-path failure: if we can't
         # save state, a crash right now means real, silent data loss on
         # open positions. Escalate loudly instead of swallowing it.
-        log_exception("save_bot_persistence", e)
+        log_exception("save_bot_persistence (write phase)", e)
         c_log(f"CRITICAL: Persistence Save Error -- open trade state may not survive a restart: {e}")
 
 def load_bot_persistence():
@@ -427,6 +449,53 @@ def _get_oanda_sem() -> asyncio.Semaphore:
     if _oanda_sem is None: _oanda_sem = asyncio.Semaphore(3)
     return _oanda_sem
 
+def _safe_float(value, default: float = 0.0) -> float:
+    """Closes the `.get(key, default)` null trap: dict.get()'s default only
+    applies when the key is MISSING. If MetaAPI returns the key present
+    with an explicit `null` (-> None in Python), .get() happily returns
+    None, and a later `+=` or arithmetic op on it raises TypeError. This
+    coerces None/non-numeric/NaN/inf values to `default` instead of
+    raising, at every point real MetaAPI numeric fields are consumed."""
+    if value is None:
+        return default
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return default
+    if f != f or f in (float('inf'), float('-inf')):  # NaN / inf guard
+        return default
+    return f
+
+def _validated_candle(c: dict, symbol: str, granularity_str: str) -> dict | None:
+    """Defensive boundary for external market data. OANDA/MetaAPI are not
+    contractually guaranteed to always return well-typed floats -- a
+    transient glitch can hand back None, a string, or a missing key.
+    Returns a clean candle dict, or None if this single candle is bad.
+    Never raises: a bad candle should be skipped, not take down the whole
+    fetch (or the caller's while-True loop) with it."""
+    try:
+        mid = c.get('mid')
+        if not isinstance(mid, dict):
+            raise ValueError(f"missing/invalid 'mid' field: {mid!r}")
+        raw_time = c.get('time')
+        if not raw_time:
+            raise ValueError("missing 'time' field")
+
+        o = float(mid['o']); h = float(mid['h']); l = float(mid['l']); c_ = float(mid['c'])
+        vol = float(c.get('volume', 1.0) or 1.0)
+
+        for v in (o, h, l, c_, vol):
+            if v != v or v in (float('inf'), float('-inf')):
+                raise ValueError(f"non-finite value in candle: {v!r}")
+
+        return {
+            'time': pd.Timestamp(raw_time).tz_convert('UTC'),
+            'open': o, 'high': h, 'low': l, 'close': c_, 'volume': vol,
+        }
+    except (TypeError, ValueError, KeyError) as e:
+        log_exception(f"_validated_candle [{symbol} {granularity_str}] -- skipping malformed candle", e)
+        return None
+
 async def fetch_candles(symbol: str, granularity_str: str, count: int = 5000, end_time: datetime = None) -> list:
     gran_str = _OANDA_GRAN.get(granularity_str, 'M1'); fetch_count = min(count, 120000)  
     collected = []; remaining = fetch_count
@@ -456,11 +525,16 @@ async def fetch_candles(symbol: str, granularity_str: str, count: int = 5000, en
             complete = [c for c in candles if c.get('complete', True)]
             if not complete: break
 
-            formatted = [{'time': pd.Timestamp(c['time']).tz_convert('UTC'), 
-                          'open': float(c['mid']['o']), 'high': float(c['mid']['h']), 
-                          'low': float(c['mid']['l']), 'close': float(c['mid']['c']),
-                          'volume': float(c.get('volume', 1.0))} for c in complete]
-                          
+            formatted = []
+            for c in complete:
+                vc = _validated_candle(c, symbol, granularity_str)
+                if vc is not None:
+                    formatted.append(vc)
+
+            if not formatted:
+                c_log(f"fetch_candles [{symbol} {granularity_str}]: entire chunk failed validation, aborting fetch.")
+                break
+
             collected = formatted + collected; remaining -= len(complete)
             earliest = pd.Timestamp(complete[0]['time']).tz_convert('UTC')
             current_end = earliest.to_pydatetime() - timedelta(seconds=1)
@@ -668,7 +742,7 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
             'be_trigger': (price + (tp - price)/2) if is_buy else (price - (price - tp)/2) # simplified BE trigger
         }
         bot_state['symbol_state'][symbol]['gann_level_status'][level['key']] = 'used'
-        save_bot_persistence()
+        await save_bot_persistence()
 
         await send_tg_msg(
             f"<b>✅ {'BUY 📈' if is_buy else 'SELL 📉'} [{symbol} - جان {tf}]</b>  {reason}\n\n"
@@ -981,7 +1055,7 @@ async def _close_metaapi_trade(symbol: str, tid: str, sym_state: dict) -> bool:
                 await send_tg_msg(f"✅ <b>تم إغلاق صفقة {symbol} (حقيقية) بنجاح لحماية الحساب!</b>")
                 if tid in sym_state['gann_open_trades']:
                     del sym_state['gann_open_trades'][tid]
-                    save_bot_persistence()
+                    await save_bot_persistence()
                 return True
             await asyncio.sleep(1.0)
         c_log(f"Timeout waiting for {tid} to disappear from MT5 positions after close_position call.")
@@ -991,6 +1065,74 @@ async def _close_metaapi_trade(symbol: str, tid: str, sym_state: dict) -> bool:
         log_exception(f"_close_metaapi_trade [{symbol}/{tid}]", e)
         await send_tg_msg(f"⚠️ <b>فشل الإغلاق الآلي:</b> صفقة {symbol} (خطأ: {e})\nيرجى التحقق يدوياً من الحساب.")
         return False
+
+_EMERGENCY_CLOSE_POLL_BUDGET_SECONDS = 25  # shared across the WHOLE batch, not per-trade
+
+async def _close_metaapi_trades_batch(closures: list) -> None:
+    """Emergency mass-closure path (daily DD/profit limit hit).
+
+    Still preserves the anti-race-condition requirement: close_position()
+    write requests are issued strictly one at a time, sequentially -- same
+    as _close_metaapi_trade, same TRADE_CONTEXT_BUSY protection. What
+    changes is confirmation polling. get_positions() is read-only; polling
+    it once per second for the ENTIRE batch (instead of each trade running
+    its own private 25x1s loop, one after another) turns worst-case tail
+    latency from O(N x 25s) into a single shared ~25s budget regardless of
+    how many trades are closing at once. Nothing here writes to the
+    broker concurrently -- only the read-only status check is shared.
+
+    `closures` is a list of (symbol, tid, sym_state) tuples for real
+    trades only; callers handle simulated-trade deletion themselves.
+    """
+    if not closures:
+        return
+    if not _metaapi_conn:
+        for symbol, tid, _ in closures:
+            c_log(f"Cannot close {tid} ({symbol}): no live MetaAPI connection. Position remains open on broker.")
+        await send_tg_msg(
+            f"🛑 <b>تعذّر إغلاق {len(closures)} صفقة:</b> لا يوجد اتصال MetaAPI. جميعها ما زالت مفتوحة على الوسيط."
+        )
+        return
+
+    pending = {}  # tid -> (symbol, sym_state)
+    for symbol, tid, sym_state in closures:
+        try:
+            await _metaapi_conn.close_position(tid)
+            pending[str(tid)] = (symbol, sym_state)
+        except Exception as e:
+            log_exception(f"_close_metaapi_trades_batch close_position [{symbol}/{tid}]", e)
+            await send_tg_msg(
+                f"⚠️ <b>فشل إرسال أمر إغلاق:</b> صفقة {symbol} ({tid}, خطأ: {e})\nيرجى التحقق يدوياً من الحساب."
+            )
+
+    if not pending:
+        return
+
+    for _ in range(_EMERGENCY_CLOSE_POLL_BUDGET_SECONDS):
+        if not pending:
+            break
+        try:
+            positions = await _metaapi_conn.get_positions()
+        except Exception as e:
+            log_exception("_close_metaapi_trades_batch get_positions", e)
+            await asyncio.sleep(1.0)
+            continue
+
+        still_open_ids = {str(p.get('id')) for p in positions}
+        for tid in list(pending.keys()):
+            if tid not in still_open_ids:
+                symbol, sym_state = pending.pop(tid)
+                await send_tg_msg(f"✅ <b>تم إغلاق صفقة {symbol} (حقيقية) بنجاح لحماية الحساب!</b>")
+                if tid in sym_state['gann_open_trades']:
+                    del sym_state['gann_open_trades'][tid]
+                    await save_bot_persistence()
+
+        if pending:
+            await asyncio.sleep(1.0)
+
+    for tid, (symbol, sym_state) in pending.items():
+        c_log(f"Timeout waiting for {tid} ({symbol}) to disappear from MT5 positions after batch close.")
+        await send_tg_msg(f"⚠️ <b>لم يتم تأكيد إغلاق {symbol} ({tid}) خلال المهلة.</b> يرجى التحقق يدوياً من الحساب.")
 
 async def gann_monitor_scanner() -> None:
     c_log('Gann live scanner started.')
@@ -1034,7 +1176,7 @@ async def gann_monitor_scanner() -> None:
                 # Save immediately — do not wait for the next trade event.
                 # A crash between this reset and the next save would
                 # otherwise reload yesterday's PnL/hit-flag on restart.
-                save_bot_persistence()
+                await save_bot_persistence()
 
             if bot_state.get('live_daily_hit'):
                 await asyncio.sleep(60)
@@ -1128,7 +1270,7 @@ async def gann_monitor_scanner() -> None:
                         active_px = live_px
                         if active_px is None:
                             if tid in actual_positions:
-                                active_px = float(actual_positions[tid].get('currentPrice', entry))
+                                active_px = _safe_float(actual_positions[tid].get('currentPrice'), entry)
                             else:
                                 active_px = tr.get('last_known_px') # Use last known, never artificially force entry
                                 
@@ -1151,7 +1293,7 @@ async def gann_monitor_scanner() -> None:
                                     found_deal = False
                                     for d in history_deals_cache:
                                         if str(d.get('positionId')) == str(tid) and d.get('entryType') == 'DEAL_ENTRY_OUT':
-                                            deal_pnl += float(d.get('profit', 0)) + float(d.get('swap', 0)) + float(d.get('commission', 0))
+                                            deal_pnl += _safe_float(d.get('profit')) + _safe_float(d.get('swap')) + _safe_float(d.get('commission'))
                                             found_deal = True
                                     if found_deal:
                                         exact_pnl = deal_pnl
@@ -1163,7 +1305,7 @@ async def gann_monitor_scanner() -> None:
                                 await send_tg_msg(msg)
                                 continue
                             else:
-                                trade_pl = actual_positions[tid].get('unrealizedProfit', trade_pl)
+                                trade_pl = _safe_float(actual_positions[tid].get('unrealizedProfit'), trade_pl)
                         
                         outcome = core_eval_outcome(is_buy, active_px, tp, sl)
                             
@@ -1176,7 +1318,7 @@ async def gann_monitor_scanner() -> None:
                                         await _metaapi_conn.modify_position(tid, stop_loss=net_be)
                                         tr['sl'] = net_be
                                         tr['be_activated'] = True # Only set if successful!
-                                        save_bot_persistence()
+                                        await save_bot_persistence()
                                         await send_tg_msg(f"🛡️ تم تفعيل Break-Even لـ {symbol}!")
                                     except Exception as e:
                                         log_exception(f"BE modify_position [{symbol}/{tid}]", e)
@@ -1186,7 +1328,7 @@ async def gann_monitor_scanner() -> None:
                                 else:
                                     tr['sl'] = net_be
                                     tr['be_activated'] = True
-                                    save_bot_persistence()
+                                    await save_bot_persistence()
 
                         if outcome:
                             closed_ids.append(tid)
@@ -1199,7 +1341,7 @@ async def gann_monitor_scanner() -> None:
                     for tid in closed_ids:
                         if tid in sym_state['gann_open_trades']:
                             del sym_state['gann_open_trades'][tid]
-                            save_bot_persistence()
+                            await save_bot_persistence()
 
             # --- Evaluate Daily Limits ---
             total_daily = bot_state['live_daily_realized'] + total_floating
@@ -1211,15 +1353,19 @@ async def gann_monitor_scanner() -> None:
                 limit_type = '🛑 تراجع عائم' if total_daily <= dd_limit else '✅ هدف يومي عائم'
                 await send_tg_msg(f"{limit_type} تم الوصول إليه! ({total_daily:.2f}$)\nسيتم إغلاق جميع الصفقات المفتوحة بالتسلسل.")
                 
-                # State-Machine Closure to avoid race conditions (Dynamic Polling)
+                # Batch closure: sequential close requests, one shared
+                # confirmation loop (see _close_metaapi_trades_batch) --
+                # avoids O(N x 25s) tail latency during a mass closure.
+                real_closures = []
                 for symbol in active_symbols:
                     sym_state = bot_state['symbol_state'][symbol]
                     for tid, tr in list(sym_state['gann_open_trades'].items()):
                         if tr.get('is_real') and _metaapi_conn:
-                            await _close_metaapi_trade(symbol, tid, sym_state)
+                            real_closures.append((symbol, tid, sym_state))
                         else:
                             del sym_state['gann_open_trades'][tid]
-                            save_bot_persistence()
+                            await save_bot_persistence()
+                await _close_metaapi_trades_batch(real_closures)
                 continue
 
             for symbol in active_symbols:
@@ -1342,6 +1488,82 @@ async def gann_cycle_manager() -> None:
             log_exception('gann_cycle_manager main loop', e)
 
         await asyncio.sleep(60)
+
+# -----------------------------------------------------------------
+# INDEPENDENT GLOBAL LEDGER RECONCILIATION
+# -----------------------------------------------------------------
+# Defense-in-depth on top of the per-tick reconciliation already inside
+# gann_monitor_scanner. That reconciliation only runs per-symbol, only
+# when a symbol has locally-tracked open trades, and shares its process
+# and state with the rest of the bot -- if bot_state itself is what's
+# wrong (e.g. a trade never got recorded locally in the first place),
+# the in-loop check can't catch it because it only checks trades IT
+# already knows about.
+#
+# This task instead starts from the broker's side: fetch every open
+# position that MetaAPI reports for this account, and check whether
+# each one is accounted for in bot_state. A position on the broker that
+# the bot has NO record of at all is the "ghost position" / unmanaged-
+# exposure scenario, and it's undetectable from inside
+# gann_monitor_scanner's per-symbol loop by construction.
+RECONCILIATION_INTERVAL_SECONDS = 300  # every 5 minutes
+_recon_consecutive_mismatches = 0
+_RECON_MISMATCH_HALT_THRESHOLD = 3
+
+async def global_ledger_reconciliation() -> None:
+    global _recon_consecutive_mismatches
+    c_log('Global ledger reconciliation started (independent broker cross-check).')
+    while True:
+        try:
+            await asyncio.sleep(RECONCILIATION_INTERVAL_SECONDS)
+
+            if bot_state.get('status') != 'RUNNING' or not _metaapi_conn:
+                continue
+
+            try:
+                broker_positions = await _metaapi_conn.get_positions()
+            except Exception as e:
+                log_exception('global_ledger_reconciliation get_positions', e)
+                continue
+
+            broker_ids = {str(p.get('id')) for p in broker_positions}
+
+            known_ids = set()
+            for sym, ss in bot_state['symbol_state'].items():
+                for tid, tr in ss.get('gann_open_trades', {}).items():
+                    if tr.get('is_real'):
+                        known_ids.add(str(tid))
+
+            ghost_ids = broker_ids - known_ids
+            missing_ids = known_ids - broker_ids
+
+            if ghost_ids:
+                _recon_consecutive_mismatches += 1
+                c_log(f"RECONCILIATION MISMATCH: {len(ghost_ids)} broker position(s) with NO matching bot "
+                      f"record: {ghost_ids}. Consecutive mismatches: {_recon_consecutive_mismatches}")
+                await send_tg_msg(
+                    f"🚨 <b>تحذير مطابقة الحساب المستقل:</b>\n"
+                    f"يوجد {len(ghost_ids)} صفقة مفتوحة على الوسيط لا يعرفها البوت إطلاقاً.\n"
+                    f"هذا يعني احتمال وجود تعرض غير مُدار (ghost position). يرجى التحقق يدوياً فوراً.\n"
+                    f"IDs: {ghost_ids}"
+                )
+                if _recon_consecutive_mismatches >= _RECON_MISMATCH_HALT_THRESHOLD:
+                    await set_connection_state(
+                        CONN_HALTED,
+                        f"{_recon_consecutive_mismatches} consecutive independent reconciliation checks found "
+                        f"unmanaged broker positions. Halting all trading until a human confirms account state."
+                    )
+            else:
+                if _recon_consecutive_mismatches > 0:
+                    c_log("Reconciliation recovered: no ghost positions found this check.")
+                _recon_consecutive_mismatches = 0
+
+            if missing_ids:
+                c_log(f"Reconciliation note: {len(missing_ids)} bot-tracked trade(s) not currently on "
+                      f"broker (expected if closed this cycle): {missing_ids}")
+
+        except Exception as e:
+            log_exception('global_ledger_reconciliation main loop', e)
 
 async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
     global _bt_progress
@@ -1994,6 +2216,12 @@ async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
     elif d == 'gann_inc_margin': 
         sym_state['gann_touch_margin_pts'] = min(50, sym_state['gann_touch_margin_pts'] + 1)
         await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
+    elif d == 'gann_dec_lot':
+        sym_state['lot_size'] = round(max(0.01, sym_state['lot_size'] - 0.01), 2)
+        await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
+    elif d == 'gann_inc_lot':
+        sym_state['lot_size'] = round(min(50.0, sym_state['lot_size'] + 0.01), 2)
+        await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
     elif d == 'gann_dec_hours': 
         sym_state['gann_cycle_hours'] = max(1, sym_state['gann_cycle_hours'] - 1)
         await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
@@ -2057,7 +2285,7 @@ async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
     # status check (which mutates nothing) falls through to here. Save
     # once, after the mutation has landed in bot_state, so a restart never
     # reverts a toggle/setting change back to the last trade's snapshot.
-    save_bot_persistence()
+    await save_bot_persistence()
 
 # ─────────────────────────────────────────────────────────────
 # TELEGRAM POLLING & WATCHDOG
@@ -2073,7 +2301,7 @@ async def process_tg_update(update: dict) -> None:
                 val = int(parts[2])
                 if parts[1] == 'ema': sym_state['trend_ema_period'] = val
                 elif parts[1] == 'vwap': sym_state['trend_vwap_period'] = val
-                save_bot_persistence()
+                await save_bot_persistence()
                 await send_tg_msg(f"✅ <b>تم التحديث بنجاح!</b>\n⚙️ {parts[1].upper()} الشامل: {val}")
                 return
             elif len(parts) == 4:
@@ -2082,7 +2310,7 @@ async def process_tg_update(update: dict) -> None:
                     val = int(val)
                     if param == 'tp': sym_state['gann_tp_per_tf'][tf] = val
                     elif param == 'sl': sym_state['gann_sl_per_tf'][tf] = val
-                    save_bot_persistence()
+                    await save_bot_persistence()
                     await send_tg_msg(f"✅ <b>تم التحديث بنجاح!</b>\n📌 الفريم: {tf}\n⚙️ {param.upper()}: {val}")
                     return
             await send_tg_msg("❌ <b>صيغة خاطئة!</b>\n<b>أمثلة صحيحة:</b>\n<code>/set ema 50</code>\n<code>/set vwap 100</code>\n<code>/set 5m tp 40</code>\n<code>/set 15m sl 25</code>")
@@ -2113,7 +2341,7 @@ async def process_tg_update(update: dict) -> None:
         if msg.startswith('/setsymbol '):
             new_sym = msg.split(' ')[1].strip()
             bot_state['symbol'] = new_sym
-            save_bot_persistence()
+            await save_bot_persistence()
             await send_tg_msg(f"✅ تم تغيير الرمز الخاص بـ MetaTrader إلى: <b>{new_sym}</b>")
         elif msg == '/start': await send_tg_msg('<b>مرحباً بك في Gold Scalper Bot v8.9</b>', get_main_keyboard())
         return
@@ -2201,6 +2429,7 @@ async def main() -> None:
         asyncio.create_task(supervised(telegram_watchdog,     label='tg_watchdog')),
         asyncio.create_task(supervised(gann_monitor_scanner,  label='gann_monitor')),
         asyncio.create_task(supervised(gann_cycle_manager,    label='gann_cycle')),
+        asyncio.create_task(supervised(global_ledger_reconciliation, label='global_reconciliation')),
     ]
     
     c_log('Gold Scalper Bot v9.4 (Resilience-First Core) started successfully.')
