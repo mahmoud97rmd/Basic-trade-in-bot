@@ -972,6 +972,9 @@ async def _close_metaapi_trade(symbol: str, tid: str, sym_state: dict) -> bool:
     try:
         await _metaapi_conn.close_position(tid)
         # State-Machine Polling for confirmation — never assume success.
+        # 1s interval (not 0.2s): fetching the full portfolio 5x/sec per
+        # trade during a batch closure risks tripping MetaAPI's rate limit
+        # (HTTP 429). The SDK already background-syncs; 1s is plenty.
         for _ in range(25):
             positions = await _metaapi_conn.get_positions()
             if not any(str(p.get('id')) == str(tid) for p in positions):
@@ -980,7 +983,7 @@ async def _close_metaapi_trade(symbol: str, tid: str, sym_state: dict) -> bool:
                     del sym_state['gann_open_trades'][tid]
                     save_bot_persistence()
                 return True
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(1.0)
         c_log(f"Timeout waiting for {tid} to disappear from MT5 positions after close_position call.")
         await send_tg_msg(f"⚠️ <b>لم يتم تأكيد إغلاق {symbol} ({tid}) خلال المهلة.</b> يرجى التحقق يدوياً من الحساب.")
         return False
@@ -1020,7 +1023,19 @@ async def gann_monitor_scanner() -> None:
                     c_log("MetaAPI reconnect exhausted 5 attempts this tick; will retry next cycle.")
 
             now_dt = datetime.now(timezone.utc)
-            
+
+            today_date = now_dt.date()
+            if bot_state.get('live_daily_date') != today_date:
+                c_log(f"New trading day detected ({bot_state.get('live_daily_date')} -> {today_date}). "
+                      f"Resetting daily PnL counters.")
+                bot_state['live_daily_date'] = today_date
+                bot_state['live_daily_realized'] = 0.0
+                bot_state['live_daily_hit'] = False
+                # Save immediately — do not wait for the next trade event.
+                # A crash between this reset and the next save would
+                # otherwise reload yesterday's PnL/hit-flag on restart.
+                save_bot_persistence()
+
             if bot_state.get('live_daily_hit'):
                 await asyncio.sleep(60)
                 continue
@@ -2038,6 +2053,12 @@ async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
         await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
     else: c_log(f'Unhandled callback: {d}')
 
+    # UI Settings Amnesia fix: every branch above except the early-return
+    # status check (which mutates nothing) falls through to here. Save
+    # once, after the mutation has landed in bot_state, so a restart never
+    # reverts a toggle/setting change back to the last trade's snapshot.
+    save_bot_persistence()
+
 # ─────────────────────────────────────────────────────────────
 # TELEGRAM POLLING & WATCHDOG
 # ─────────────────────────────────────────────────────────────
@@ -2052,6 +2073,7 @@ async def process_tg_update(update: dict) -> None:
                 val = int(parts[2])
                 if parts[1] == 'ema': sym_state['trend_ema_period'] = val
                 elif parts[1] == 'vwap': sym_state['trend_vwap_period'] = val
+                save_bot_persistence()
                 await send_tg_msg(f"✅ <b>تم التحديث بنجاح!</b>\n⚙️ {parts[1].upper()} الشامل: {val}")
                 return
             elif len(parts) == 4:
@@ -2060,6 +2082,7 @@ async def process_tg_update(update: dict) -> None:
                     val = int(val)
                     if param == 'tp': sym_state['gann_tp_per_tf'][tf] = val
                     elif param == 'sl': sym_state['gann_sl_per_tf'][tf] = val
+                    save_bot_persistence()
                     await send_tg_msg(f"✅ <b>تم التحديث بنجاح!</b>\n📌 الفريم: {tf}\n⚙️ {param.upper()}: {val}")
                     return
             await send_tg_msg("❌ <b>صيغة خاطئة!</b>\n<b>أمثلة صحيحة:</b>\n<code>/set ema 50</code>\n<code>/set vwap 100</code>\n<code>/set 5m tp 40</code>\n<code>/set 15m sl 25</code>")
@@ -2090,6 +2113,7 @@ async def process_tg_update(update: dict) -> None:
         if msg.startswith('/setsymbol '):
             new_sym = msg.split(' ')[1].strip()
             bot_state['symbol'] = new_sym
+            save_bot_persistence()
             await send_tg_msg(f"✅ تم تغيير الرمز الخاص بـ MetaTrader إلى: <b>{new_sym}</b>")
         elif msg == '/start': await send_tg_msg('<b>مرحباً بك في Gold Scalper Bot v8.9</b>', get_main_keyboard())
         return
@@ -2099,32 +2123,39 @@ async def process_tg_update(update: dict) -> None:
     bot_state['chat_id'] = chat_id
     asyncio.create_task(answer_callback(q['id']))
     try: await _handle_callback(d, chat_id, msg_id)
-    except Exception as e: c_log(f'CB error [{d}]: {e}')
+    except Exception as e: log_exception(f'callback dispatch [{d}]', e)
 
 _poll_task: asyncio.Task | None = None
 
 async def telegram_polling_loop() -> None:
     c_log('Telegram polling started.'); url = f'https://api.telegram.org/bot{TG_TOKEN}/getUpdates'
     backoff = 1
-    while True:
-        connector = aiohttp.TCPConnector(limit=4, ttl_dns_cache=300, force_close=True)
-        timeout = aiohttp.ClientTimeout(total=None, connect=10, sock_read=28)
-        sess = aiohttp.ClientSession(connector=connector, timeout=timeout)
-        try:
-            while True:
-                try:
-                    async with sess.get(url, params={'offset': bot_state['last_update_id'] + 1, 'timeout': 20}) as resp:
-                        if resp.status == 200:
-                            backoff = 1; bot_state['last_poll_ok'] = datetime.now(timezone.utc).timestamp()
-                            data = await resp.json()
-                            for upd in data.get('result', []):
-                                bot_state['last_update_id'] = upd['update_id']
-                                asyncio.create_task(process_tg_update(upd))
-                        else: await asyncio.sleep(backoff); backoff = min(backoff * 2, 30)
-                except Exception: await asyncio.sleep(backoff); backoff = min(backoff * 2, 30); break
-        except asyncio.CancelledError: await sess.close(); raise
-        finally: await sess.close()
-        await asyncio.sleep(1)
+    # Single persistent session for the lifetime of this task. Recreating
+    # a ClientSession + TCPConnector on every backoff cycle leaked sockets
+    # into TIME_WAIT over long uptimes. We only ever tear this down once,
+    # in the finally block below, on task cancellation/shutdown.
+    connector = aiohttp.TCPConnector(limit=4, ttl_dns_cache=300, force_close=True)
+    timeout = aiohttp.ClientTimeout(total=None, connect=10, sock_read=28)
+    sess = aiohttp.ClientSession(connector=connector, timeout=timeout)
+    try:
+        while True:
+            try:
+                async with sess.get(url, params={'offset': bot_state['last_update_id'] + 1, 'timeout': 20}) as resp:
+                    if resp.status == 200:
+                        backoff = 1; bot_state['last_poll_ok'] = datetime.now(timezone.utc).timestamp()
+                        data = await resp.json()
+                        for upd in data.get('result', []):
+                            bot_state['last_update_id'] = upd['update_id']
+                            asyncio.create_task(process_tg_update(upd))
+                    else:
+                        await asyncio.sleep(backoff); backoff = min(backoff * 2, 30)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log_exception('telegram_polling_loop', e)
+                await asyncio.sleep(backoff); backoff = min(backoff * 2, 30)
+    finally:
+        await sess.close()
 
 async def telegram_watchdog() -> None:
     global _poll_task
