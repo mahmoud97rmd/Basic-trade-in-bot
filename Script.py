@@ -159,6 +159,17 @@ DATA_DIR = os.environ.get('PERSISTENT_DATA_PATH', '/app/data')
 os.makedirs(DATA_DIR, exist_ok=True)
 PERSISTENCE_FILE = os.path.join(DATA_DIR, 'bot_persistence.json')
 TEMP_PERSISTENCE_FILE = os.path.join(DATA_DIR, 'bot_persistence.tmp')
+PRESETS_FILE = os.path.join(DATA_DIR, 'presets.json')
+TEMP_PRESETS_FILE = os.path.join(DATA_DIR, 'presets.tmp')
+
+# Live runtime fields that a preset must never capture or restore --
+# includes gann_last_h1_time/gann_cycle_started_at (raw datetime objects,
+# not JSON-serializable at all) plus other in-flight state that belongs to
+# whatever is currently running, not to a saved settings snapshot.
+_PRESET_EXCLUDED_KEYS = {
+    'gann_levels', 'gann_level_status', 'gann_cycle_active', 'gann_open_trades',
+    'gann_last_h1_time', 'gann_cycle_started_at', 'auto_trade',
+}
 
 # Event-loop I/O offloading (v9.5): json.dump + os.fsync + os.replace are
 # blocking syscalls. Calling them directly from async code stalls the
@@ -2144,28 +2155,63 @@ async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
         await _show(chat_id, msg_id, '<b>إدارة الإعدادات (Presets):</b>\nهنا يمكنك حفظ إعدادات جميع الأزواج واستعادتها لاحقاً.', kbd)
     elif d.startswith('save_preset_'):
         p_num = d.split('_')[-1]
+        data = {}
+        if os.path.exists(PRESETS_FILE):
+            try:
+                with open(PRESETS_FILE, 'r') as f: data = json.load(f)
+            except Exception as e:
+                # Corrupt presets file -- log it instead of silently
+                # discarding whatever else was saved in there.
+                log_exception(f"save_preset_{p_num} (reading existing presets)", e)
+                await send_tg_msg(f"⚠️ ملف الـ Presets الحالي تالف، سيتم إنشاء ملف جديد. (الخطأ: {e})")
+                data = {}
+
+        # A preset should only ever capture settings, never live runtime
+        # state -- and critically, gann_last_h1_time/gann_cycle_started_at
+        # are live datetime objects once any cycle has run (which is
+        # almost immediately after startup). json.dump() cannot serialize
+        # a raw datetime at all, so saving used to raise TypeError as soon
+        # as this state existed. _PRESET_EXCLUDED_KEYS matches exactly
+        # what load_preset already refuses to restore, so nothing is lost
+        # by leaving them out of what gets saved in the first place.
+        data[f'preset_{p_num}'] = {
+            s_name: {k: v for k, v in s_data.items() if k not in _PRESET_EXCLUDED_KEYS}
+            for s_name, s_data in bot_state['symbol_state'].items()
+        }
         try:
-            with open('presets.json', 'r') as f: data = json.load(f)
-        except: data = {}
-        data[f'preset_{p_num}'] = bot_state['symbol_state']
-        with open('presets.json', 'w') as f: json.dump(data, f)
-        await send_tg_msg(f"✅ تم حفظ الإعدادات الحالية في Preset {p_num}")
+            with open(TEMP_PRESETS_FILE, 'w') as f:
+                json.dump(data, f)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(TEMP_PRESETS_FILE, PRESETS_FILE)
+            await send_tg_msg(f"✅ تم حفظ الإعدادات الحالية في Preset {p_num}")
+        except Exception as e:
+            log_exception(f"save_preset_{p_num} (writing)", e)
+            await send_tg_msg(f"❌ فشل حفظ Preset {p_num}: {e}")
     elif d.startswith('load_preset_'):
         p_num = d.split('_')[-1]
-        try:
-            with open('presets.json', 'r') as f: data = json.load(f)
-            if f'preset_{p_num}' in data:
-                # Load settings, but keep live data like open_trades and gann_levels untouched
-                for s_name, s_data in data[f'preset_{p_num}'].items():
-                    if s_name in bot_state['symbol_state']:
-                        for k, v in s_data.items():
-                            if k not in ['gann_levels', 'gann_level_status', 'gann_cycle_active', 'gann_open_trades', 'gann_last_h1_time', 'gann_cycle_started_at', 'auto_trade']:
-                                bot_state['symbol_state'][s_name][k] = v
-                await send_tg_msg(f"✅ تم تحميل الإعدادات من Preset {p_num} بنجاح!")
-            else:
-                await send_tg_msg("❌ لا يوجد إعدادات محفوظة في هذا الـ Preset.")
-        except Exception as e:
-            await send_tg_msg("❌ حدث خطأ أثناء التحميل.")
+        if not os.path.exists(PRESETS_FILE):
+            await send_tg_msg(
+                "❌ لا يوجد ملف Presets محفوظ بعد.\n"
+                "ملاحظة: كانت الإصدارات السابقة تحفظ هذا الملف في مسار مؤقت يُمسح عند إعادة التشغيل -- "
+                "تم إصلاح ذلك الآن، فأي Preset تحفظه من الآن فصاعداً سيبقى بعد إعادة التشغيل."
+            )
+        else:
+            try:
+                with open(PRESETS_FILE, 'r') as f: data = json.load(f)
+                if f'preset_{p_num}' in data:
+                    # Load settings, but keep live data like open_trades and gann_levels untouched
+                    for s_name, s_data in data[f'preset_{p_num}'].items():
+                        if s_name in bot_state['symbol_state']:
+                            for k, v in s_data.items():
+                                if k not in _PRESET_EXCLUDED_KEYS:
+                                    bot_state['symbol_state'][s_name][k] = v
+                    await send_tg_msg(f"✅ تم تحميل الإعدادات من Preset {p_num} بنجاح!")
+                else:
+                    await send_tg_msg("❌ لا يوجد إعدادات محفوظة في هذا الـ Preset.")
+            except Exception as e:
+                log_exception(f"load_preset_{p_num}", e)
+                await send_tg_msg(f"❌ حدث خطأ أثناء التحميل: {e}")
 
     elif d == 'menu_protection':
         await _show(chat_id, msg_id, 'إعدادات الحماية:', get_protection_keyboard())
