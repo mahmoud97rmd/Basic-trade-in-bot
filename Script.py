@@ -427,15 +427,31 @@ async def _show(chat_id, msg_id, text: str, reply_markup: dict = None) -> None:
 async def answer_callback(cbq_id: str) -> None:
     await _tg_post(f'https://api.telegram.org/bot{TG_TOKEN}/answerCallbackQuery', json={'callback_query_id': cbq_id})
 
+TG_CAPTION_LIMIT = 1024  # Telegram hard limit for document/photo captions
+
 async def send_tg_document(file_path: str, caption: str) -> None:
     if not bot_state['chat_id']: return
     try:
+        # A caption over Telegram's limit doesn't get truncated by the API --
+        # the whole sendDocument call is rejected, so the file itself would
+        # never arrive. Keep the merged single-message intent when it fits;
+        # fall back to a short caption + a separate full-text message only
+        # when it doesn't.
+        doc_caption = caption
+        overflow_text = None
+        if len(caption) > TG_CAPTION_LIMIT:
+            doc_caption = caption[:TG_CAPTION_LIMIT - 20].rstrip() + "\n... (تابع أدناه)"
+            overflow_text = caption
+
         with open(file_path, 'rb') as f:
             data = aiohttp.FormData()
             data.add_field('chat_id',  str(bot_state['chat_id']))
             data.add_field('document', f, filename=os.path.basename(file_path))
-            data.add_field('caption',  caption)
+            data.add_field('caption',  doc_caption)
             await _tg_post(f'https://api.telegram.org/bot{TG_TOKEN}/sendDocument', data=data)
+
+        if overflow_text:
+            await send_tg_msg(overflow_text)
     except Exception as e:
         log_exception(f"send_tg_document [{file_path}]", e)
 
@@ -1113,6 +1129,8 @@ async def _close_metaapi_trades_batch(closures: list) -> None:
             break
         try:
             positions = await _metaapi_conn.get_positions()
+            if not isinstance(positions, list):
+                raise TypeError(f"get_positions() returned {type(positions).__name__}, expected list")
         except Exception as e:
             log_exception("_close_metaapi_trades_batch get_positions", e)
             await asyncio.sleep(1.0)
@@ -1179,6 +1197,21 @@ async def gann_monitor_scanner() -> None:
                 await save_bot_persistence()
 
             if bot_state.get('live_daily_hit'):
+                # New entries stay blocked either way. But don't let a failed/
+                # incomplete mass closure go un-retried forever just because
+                # the flag that blocks new entries is also what this gate
+                # checks -- those are two different concerns.
+                stale_active_symbols = [s for s, on in bot_state['active_symbols'].items() if on]
+                stale_real_closures = []
+                for symbol in stale_active_symbols:
+                    sym_state = bot_state['symbol_state'][symbol]
+                    for tid, tr in list(sym_state['gann_open_trades'].items()):
+                        if tr.get('is_real') and _metaapi_conn:
+                            stale_real_closures.append((symbol, tid, sym_state))
+                if stale_real_closures:
+                    c_log(f"live_daily_hit is set but {len(stale_real_closures)} real trade(s) are still open -- "
+                          f"retrying the mass closure (previous attempt may have crashed/errored mid-way).")
+                    await _close_metaapi_trades_batch(stale_real_closures)
                 await asyncio.sleep(60)
                 continue
                 
@@ -1522,6 +1555,8 @@ async def global_ledger_reconciliation() -> None:
 
             try:
                 broker_positions = await _metaapi_conn.get_positions()
+                if not isinstance(broker_positions, list):
+                    raise TypeError(f"get_positions() returned {type(broker_positions).__name__}, expected list")
             except Exception as e:
                 log_exception('global_ledger_reconciliation get_positions', e)
                 continue
@@ -1754,6 +1789,7 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
         open_trades = []
         closed_trades = []
         suspended_days = {}
+        suspend_trigger_time = {}
         daily_pl = 0.0
         current_day = None
         latest_price = {}
@@ -1792,7 +1828,10 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
                     suspended_days[current_day] = f'🛑 تراجع عائم (الحد {dd_limit}$ | المحقق: {round(daily_pl, 2)}$ + العائم: {round(floating_pl, 2)}$ = {round(total_daily, 2)}$)'
                 elif profit_limit > 0 and total_daily >= profit_limit:
                     suspended_days[current_day] = f'✅ هدف عائم (الحد {profit_limit}$ | المحقق: {round(daily_pl, 2)}$ + العائم: {round(floating_pl, 2)}$ = {round(total_daily, 2)}$)'
-                    
+
+                if current_day in suspended_days and current_day not in suspend_trigger_time:
+                    suspend_trigger_time[current_day] = t
+
                 if current_day in suspended_days:
                     # Close all open trades at current market price!
                     for tr in open_trades:
@@ -1840,7 +1879,7 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
                             tr['p_usd'] = round(abs(sl_current - entry) * lot * cs * quote_conv, 2) if tr['outcome'] == 'BREAK_EVEN' else -round(sl_d * lot * cs * quote_conv, 2)
                             closed = True
                         elif not closed and h >= tp_px:
-                            tr['outcome'] = 'WIN ✅'
+                            tr['outcome'] = 'WIN'
                             tr['p_usd'] = round(tr['tp_d'] * lot * cs * quote_conv, 2)
                             closed = True
                     else:
@@ -1849,7 +1888,7 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
                             tr['p_usd'] = round(abs(entry - sl_current) * lot * cs * quote_conv, 2) if tr['outcome'] == 'BREAK_EVEN' else -round(sl_d * lot * cs * quote_conv, 2)
                             closed = True
                         elif not closed and l <= tp_px:
-                            tr['outcome'] = 'WIN ✅'
+                            tr['outcome'] = 'WIN'
                             tr['p_usd'] = round(tr['tp_d'] * lot * cs * quote_conv, 2)
                             closed = True
                             
@@ -1923,7 +1962,8 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
         c_log('BT: Generating Excel')
         
         sum_text = (
-            f"جان {syms_label} | {desc_mode} | {desc_star}\n"
+            f"<b>باكتيست جان اكتمل ✅</b>\n"
+            f"{syms_label} H1→[{desc_tfs}] | {desc_mode} | {desc_star}{desc_be}\n"
             f"{start_dt.strftime('%Y-%m-%d')} → {end_dt.strftime('%Y-%m-%d')}\n\n"
             f"Net: {'PROFIT ▲' if res['total_prof']>=0 else 'LOSS ▼'} ${round(res['total_prof'], 2)}\n"
             f"Win:  +${round(res['total_win_usd'], 2)} ({res['win']})\n"
@@ -1967,9 +2007,10 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
                 ws_trades.cell(row=row_idx, column=1).fill = header_fill
                 ws_trades.cell(row=row_idx, column=1).font = Font(bold=True)
                 
+            _OUTCOME_DISPLAY = {'WIN': 'WIN ✅', 'LOSS': 'LOSS ❌', 'BREAK_EVEN': 'BREAK_EVEN ⚖️', 'DAILY_LIMIT': 'DAILY_LIMIT ⏹️'}
             row_data = [
                 tr['الزوج'], tr['وقت الصفقة (DAM)'], tr['TF'], tr['اتجاه'], tr['المستوى (الدخول)'],
-                tr['الهدف (TP)'], tr['الوقف (SL)'], tr['النتيجة'], tr['ربح ($)'], tr['رصيد تراكمي ($)']
+                tr['الهدف (TP)'], tr['الوقف (SL)'], _OUTCOME_DISPLAY.get(tr['النتيجة'], tr['النتيجة']), tr['ربح ($)'], tr['رصيد تراكمي ($)']
             ]
             ws_trades.append(row_data)
             row_idx = ws_trades.max_row
@@ -1989,7 +2030,18 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
         
         for cycle in res['cycle_logs']:
             num_trades = len([t for t in res['trade_logs'] if t['cycle_ts'] == cycle['time_ts']])
-            note = f"تم تنفيذ {num_trades} صفقة" if num_trades > 0 else "لم يلمس السعر أي مستوى"
+            cycle_day = _utc_to_dam(cycle['time_dt']).strftime('%Y-%m-%d')
+            if num_trades > 0:
+                note = f"تم تنفيذ {num_trades} صفقة"
+            elif cycle_day in suspend_trigger_time and cycle['time_dt'] >= suspend_trigger_time[cycle_day]:
+                # Distinguish "day was already halted by capital protection"
+                # from "price genuinely never reached a level" -- these are
+                # very different situations and were previously reported
+                # identically, which made it look like the strategy just
+                # wasn't triggering when actually trading had stopped.
+                note = "🛑 اليوم متوقف (تم تفعيل حماية رأس المال مسبقاً)"
+            else:
+                note = "لم يلمس السعر أي مستوى"
             ws_cycles.append([cycle['symbol'], _utc_to_dam(cycle['time_dt']).strftime('%Y-%m-%d %H:%M'), cycle['close'], num_trades, note])
             
         ws_susp = wb.create_sheet("أيام الإيقاف")
@@ -2015,7 +2067,7 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
         
         wb.save(fname)
         
-        await prog.done(f'<b>باكتيست جان اكتمل ✅</b>\n{syms_label} H1→[{desc_tfs}] | {desc_mode} | {desc_star}{desc_be}\n{start_dt.strftime("%Y-%m-%d")} → {end_dt.strftime("%Y-%m-%d")}\n\nNet: {"PROFIT ▲" if res["total_prof"]>=0 else "LOSS ▼"} ${round(res["total_prof"], 2)}\nWin:  +${round(res["total_win_usd"], 2)} ({res["win"]})\nLoss: -${round(res["total_loss_usd"], 2)} ({res["loss"]})\nBreak-Even: $0.0 ({res["be"]})\nWR: {round(res["win"]/max(1, res["win"]+res["loss"])*100)}% ({len(res["trade_logs"])} صفقة)\nMax DD: ${round(res["max_dd"],2)} ({round((res["max_dd"]/max(1,res["peak_equity"]))*100)}%)\nدورات H1: {len(res["cycle_logs"])}  |  TP/SL: {"ATR" if tpsl_mode=="atr" else "نقاط ثابتة"} | Lot: {lot}\n\nإرسال ملف Excel...')
+        await prog.done(f'<b>باكتيست جان اكتمل ✅</b>\n{syms_label} — {len(res["trade_logs"])} صفقة\nجاري إرسال التقرير والملف...')
         await send_tg_document(fname, sum_text)
         os.remove(fname)
 
