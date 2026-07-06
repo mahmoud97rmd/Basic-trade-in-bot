@@ -116,32 +116,11 @@ async def set_connection_state(new_state: str, reason: str) -> None:
     icon = {'RUNNING': '\u2705', 'READ_ONLY': '\U0001F7E1', 'HALTED': '\U0001F6D1'}.get(new_state, '\u2139')
     await send_tg_msg(f"{icon} <b>connection state changed: {old_state} -> {new_state}</b>\n{reason}")
 
-_DAM_RESTRICTED_WINDOWS = [
-    (dtime(7, 0),  dtime(9, 0)),   # European Open fakeouts
-    (dtime(13, 0), dtime(14, 0)),  # Pre-US session turbulence
-]
-
-def _is_within_dam_restricted_window() -> bool:
-    """DAM (Damascus / UTC+3) time-of-day filter. Based on backtest
-    analysis, these windows carry enough market noise to invalidate Gann
-    levels and stack losses, so new entries are skipped during them.
-    Existing-position management (BE/TP/SL/closures) is NOT affected --
-    this only blocks NEW trade dispatch, same scope as is_trading_allowed().
-    Toggleable via bot_state['prot_dam_time_filter'] (default: on)."""
-    if not bot_state.get('prot_dam_time_filter', True):
-        return False
-    dam_now = datetime.now(timezone.utc) + timedelta(hours=3)
-    t = dam_now.time()
-    return any(start <= t < end for start, end in _DAM_RESTRICTED_WINDOWS)
-
 def is_trading_allowed() -> bool:
     """New order placement is only allowed when the connection state is
-    fully healthy AND we're not inside a restricted DAM time window.
-    Existing-position management (BE/TP/SL) is handled separately and is
-    NOT gated by this, per the OANDA-degraded-mode rule."""
+    fully healthy. The strict DAM time filter is now enforced directly
+    inside the scanner and backtest loops for precision."""
     if bot_state.get('connection_state', CONN_RUNNING) != CONN_RUNNING:
-        return False
-    if _is_within_dam_restricted_window():
         return False
     return True
 
@@ -776,12 +755,8 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
     # connection state machine says we shouldn't be trading, or while
     # we're inside a restricted DAM time window.
     if not is_trading_allowed():
-        if bot_state.get('connection_state', CONN_RUNNING) != CONN_RUNNING:
-            c_log(f"Skipped entry [{symbol} {tf}]: connection_state={bot_state.get('connection_state')} "
-                  f"({bot_state.get('connection_state_reason')})")
-        else:
-            c_log(f"Skipped entry [{symbol} {tf}]: inside restricted DAM trading window "
-                  f"({datetime.now(timezone.utc) + timedelta(hours=3):%H:%M} DAM).")
+        c_log(f"Skipped entry [{symbol} {tf}]: connection_state={bot_state.get('connection_state')} "
+              f"({bot_state.get('connection_state_reason')})")
         return
 
     try:
@@ -1561,6 +1536,11 @@ async def gann_monitor_scanner() -> None:
                         if macro_trend_up is None: continue 
                         trend_up = macro_trend_up
 
+                    # Damascus Time (UTC+3) Circuit Breaker
+                    dam_now = datetime.now(timezone.utc) + timedelta(hours=3)
+                    if dam_now.hour in [7, 8, 13]:
+                        continue
+
                     for lv in levels:
                         k = lv['key']; dir = lv['dir']
                         combo_key = f"{k}_{tf}" if bot_state['prot_allow_multi_tf'] else k
@@ -1839,6 +1819,12 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
 
                     for bar in m_window:
                         bar_close = float(bar['close']); bar_time = bar['time']
+                        
+                        # Damascus Time (UTC+3) Circuit Breaker
+                        dam_hour = (bar_time + timedelta(hours=3)).hour
+                        if dam_hour in [7, 8, 13]:
+                            continue
+
                         trend_up = True
                         if sym_state['gann_entry_mode'] == 'touch_trend':
                             trend_time = bar_time.floor(trend_freq)
