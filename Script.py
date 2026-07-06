@@ -414,6 +414,14 @@ def _to_reply_kbd(inline_kbd: dict):
         new_row = []
         for btn in row:
             text = btn['text']; cb = btn.get('callback_data', 'noop')
+            if text in bmap and bmap[text] != cb and cb != 'noop' and bmap[text] != 'noop':
+                # This is exactly the bug class that caused the loss/profit
+                # buttons to collide: two DIFFERENT actions sharing the same
+                # button text, silently overwriting each other in the map
+                # that resolves a tapped label back to an action. Every
+                # button's text must be unique within a single keyboard.
+                c_log(f"BUTTON LABEL COLLISION: '{text}' maps to both '{bmap[text]}' and '{cb}' -- "
+                      f"the second silently wins and the first becomes untappable. Fix the keyboard's labels.")
             new_row.append({'text': text}); bmap[text] = cb
         rows.append(new_row)
     return {'keyboard': rows, 'resize_keyboard': True, 'is_persistent': True, 'input_field_placeholder': 'اختر من القائمة...'}, bmap
@@ -875,13 +883,13 @@ def get_protection_keyboard() -> dict:
         [{'text': '── الحدود اليومية ──', 'callback_data': 'noop'}],
         [{'text': f'📉 أقصى تراجع يومي: ${dd}', 'callback_data': 'noop'}],
         [
-            {'text': '➖ $50', 'callback_data': 'prot_dec_dd'},
-            {'text': '➕ $50', 'callback_data': 'prot_inc_dd'}
+            {'text': '➖ خسارة $50', 'callback_data': 'prot_dec_dd'},
+            {'text': '➕ خسارة $50', 'callback_data': 'prot_inc_dd'}
         ],
         [{'text': f'💰 هدف الربح اليومي: ${profit}', 'callback_data': 'noop'}],
         [
-            {'text': '➖ $50', 'callback_data': 'prot_dec_profit'},
-            {'text': '➕ $50', 'callback_data': 'prot_inc_profit'}
+            {'text': '➖ ربح $50', 'callback_data': 'prot_dec_profit'},
+            {'text': '➕ ربح $50', 'callback_data': 'prot_inc_profit'}
         ],
         [{'text': '── الحماية المتقدمة (v9.0) ──', 'callback_data': 'noop'}],
         [{'text': f"مزامنة MT4 (Reconciliation): {'✅' if bot_state.get('prot_true_sync', True) else '🔴'}", 'callback_data': 'tg_prot_sync'}],
