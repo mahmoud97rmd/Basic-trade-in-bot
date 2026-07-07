@@ -809,11 +809,14 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
                 is_real = False
             else:
                 try:
-                    mt4_symbol = bot_state.get('symbol', symbol.replace('_', ''))
+                    # Convert data feed symbol (e.g., XAU_USD) to broker symbol (e.g., XAUUSD)
+                    # The data feed requires the underscore, but the broker terminal expects no underscore.
+                    broker_symbol = symbol.replace("_", "") if symbol == "XAU_USD" else symbol
+                    
                     if is_buy:
-                        res = await _metaapi_conn.create_market_buy_order(mt4_symbol, lot, stop_loss=sl, take_profit=tp)
+                        res = await _metaapi_conn.create_market_buy_order(broker_symbol, lot, stop_loss=sl, take_profit=tp)
                     else:
-                        res = await _metaapi_conn.create_market_sell_order(mt4_symbol, lot, stop_loss=sl, take_profit=tp)
+                        res = await _metaapi_conn.create_market_sell_order(broker_symbol, lot, stop_loss=sl, take_profit=tp)
 
                     trade_id = str(res.get('orderId', res.get('positionId', trade_id)))
                     real_msg = "\n🚀 <b>تم فتح الصفقة حقيقياً على حسابك!</b>"
