@@ -926,6 +926,7 @@ def get_main_keyboard() -> dict:
     return {'inline_keyboard': [
         [{'text': '🔌 فحص حالة حساب MetaAPI', 'callback_data': 'check_metaapi_status'}],
         [{'text': '🩺 تشخيص: ليه مفيش صفقات؟', 'callback_data': 'run_diag'}],
+        [{'text': '🔓 استئناف يدوي بعد HALT (بعد التأكد من الحساب)', 'callback_data': 'manual_resume_step1'}],
         [{'text': '📐 محرك جان (الاستراتيجية)', 'callback_data': 'menu_gann'}],
         [{'text': '🛡️ إعدادات الحماية', 'callback_data': 'menu_protection'}],
         [{'text': '💾 إدارة الإعدادات (Presets)', 'callback_data': 'menu_presets'}],
@@ -2425,6 +2426,35 @@ async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
                 log_exception('gann_run_diagnostics', e)
                 await send_tg_msg(f"❌ فشل التشخيص: {e}")
         asyncio.create_task(_run_diag_task())
+        return
+    if d == 'manual_resume_step1':
+        current_state = bot_state.get('connection_state', CONN_RUNNING)
+        if current_state == CONN_RUNNING:
+            await send_tg_msg("✅ البوت أصلاً في حالة RUNNING -- لا حاجة لأي استئناف.")
+            return
+        await send_tg_msg(
+            f"⚠️ <b>تأكيد الاستئناف اليدوي</b>\n"
+            f"الحالة الحالية: {current_state}\n"
+            f"السبب: {bot_state.get('connection_state_reason', '-')}\n\n"
+            f"هل تأكدت فعلياً من حساب الوسيط (MT5) ومقارنته بما يتتبعه البوت؟ "
+            f"الضغط على تأكيد سيعيد البوت للعمل فوراً بافتراض أن الحساب سليم.",
+            reply_markup={'inline_keyboard': [
+                [{'text': '✅ نعم، تأكدت -- استأنف الآن', 'callback_data': 'manual_resume_confirm'}],
+                [{'text': '❌ إلغاء', 'callback_data': 'menu_main'}],
+            ]}
+        )
+        return
+    if d == 'manual_resume_confirm':
+        global _recon_consecutive_mismatches, _consecutive_real_order_failures
+        prior_state = bot_state.get('connection_state', CONN_RUNNING)
+        _recon_consecutive_mismatches = 0
+        _consecutive_real_order_failures = 0
+        await set_connection_state(
+            CONN_RUNNING,
+            f"Manually resumed by operator via Telegram after verifying account state "
+            f"(was {prior_state})."
+        )
+        await send_tg_msg("✅ تم الاستئناف اليدوي. البوت الآن RUNNING وسيقبل صفقات جديدة من التحديث القادم.")
         return
 
     sym = bot_state['ui_selected_symbol']
