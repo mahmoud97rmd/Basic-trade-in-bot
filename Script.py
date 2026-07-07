@@ -116,11 +116,32 @@ async def set_connection_state(new_state: str, reason: str) -> None:
     icon = {'RUNNING': '\u2705', 'READ_ONLY': '\U0001F7E1', 'HALTED': '\U0001F6D1'}.get(new_state, '\u2139')
     await send_tg_msg(f"{icon} <b>connection state changed: {old_state} -> {new_state}</b>\n{reason}")
 
+_DAM_RESTRICTED_WINDOWS = [
+    (dtime(7, 0),  dtime(9, 0)),   # European Open fakeouts
+    (dtime(13, 0), dtime(14, 0)),  # Pre-US session turbulence
+]
+
+def _is_within_dam_restricted_window() -> bool:
+    """DAM (Damascus / UTC+3) time-of-day filter. Based on backtest
+    analysis, these windows carry enough market noise to invalidate Gann
+    levels and stack losses, so new entries are skipped during them.
+    Existing-position management (BE/TP/SL/closures) is NOT affected --
+    this only blocks NEW trade dispatch, same scope as is_trading_allowed().
+    Toggleable via bot_state['prot_dam_time_filter'] (default: on)."""
+    if not bot_state.get('prot_dam_time_filter', True):
+        return False
+    dam_now = datetime.now(timezone.utc) + timedelta(hours=3)
+    t = dam_now.time()
+    return any(start <= t < end for start, end in _DAM_RESTRICTED_WINDOWS)
+
 def is_trading_allowed() -> bool:
     """New order placement is only allowed when the connection state is
-    fully healthy. The strict DAM time filter is now enforced directly
-    inside the scanner and backtest loops for precision."""
+    fully healthy AND we're not inside a restricted DAM time window.
+    Existing-position management (BE/TP/SL) is handled separately and is
+    NOT gated by this, per the OANDA-degraded-mode rule."""
     if bot_state.get('connection_state', CONN_RUNNING) != CONN_RUNNING:
+        return False
+    if _is_within_dam_restricted_window():
         return False
     return True
 
@@ -755,8 +776,12 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
     # connection state machine says we shouldn't be trading, or while
     # we're inside a restricted DAM time window.
     if not is_trading_allowed():
-        c_log(f"Skipped entry [{symbol} {tf}]: connection_state={bot_state.get('connection_state')} "
-              f"({bot_state.get('connection_state_reason')})")
+        if bot_state.get('connection_state', CONN_RUNNING) != CONN_RUNNING:
+            c_log(f"Skipped entry [{symbol} {tf}]: connection_state={bot_state.get('connection_state')} "
+                  f"({bot_state.get('connection_state_reason')})")
+        else:
+            c_log(f"Skipped entry [{symbol} {tf}]: inside restricted DAM trading window "
+                  f"({datetime.now(timezone.utc) + timedelta(hours=3):%H:%M} DAM).")
         return
 
     try:
@@ -900,6 +925,7 @@ _bt_progress: BtProgress | None = None
 def get_main_keyboard() -> dict:
     return {'inline_keyboard': [
         [{'text': '🔌 فحص حالة حساب MetaAPI', 'callback_data': 'check_metaapi_status'}],
+        [{'text': '🩺 تشخيص: ليه مفيش صفقات؟', 'callback_data': 'run_diag'}],
         [{'text': '📐 محرك جان (الاستراتيجية)', 'callback_data': 'menu_gann'}],
         [{'text': '🛡️ إعدادات الحماية', 'callback_data': 'menu_protection'}],
         [{'text': '💾 إدارة الإعدادات (Presets)', 'callback_data': 'menu_presets'}],
@@ -1223,6 +1249,141 @@ async def _close_metaapi_trades_batch(closures: list) -> None:
             f"⚠️ <b>لم يتم تأكيد إغلاق {symbol} ({tid}) خلال المهلة.</b> يرجى التحقق يدوياً من الحساب.\n\n{_trade_detail_line(tr)}"
         )
 
+async def gann_run_diagnostics() -> str:
+    """Walks through every gate _gann_open_trade's callers check, per
+    active symbol, and reports the exact state of each one. Read-only --
+    never opens a trade, just explains why one would or wouldn't fire
+    right now."""
+    lines = ["<b>🩺 تشخيص أسباب عدم فتح الصفقات</b>\n"]
+
+    # --- Global gates (apply to every symbol) ---
+    conn_state = bot_state.get('connection_state', CONN_RUNNING)
+    conn_ok = conn_state == CONN_RUNNING
+    lines.append(f"1️⃣ حالة الاتصال: {'✅ RUNNING' if conn_ok else f'🛑 {conn_state}'}")
+    if not conn_ok:
+        lines.append(f"   السبب: {bot_state.get('connection_state_reason', '-')}")
+
+    dam_blocked = _is_within_dam_restricted_window()
+    dam_now = datetime.now(timezone.utc) + timedelta(hours=3)
+    filter_on = bot_state.get('prot_dam_time_filter', True)
+    lines.append(f"2️⃣ فلتر أوقات دمشق: {'مفعّل' if filter_on else '🔴 معطّل'} | الوقت الآن (DAM): {dam_now:%H:%M}")
+    if filter_on and dam_blocked:
+        lines.append("   🛑 داخل نافذة محظورة الآن -- لن تُفتح أي صفقة جديدة حتى تنتهي.")
+
+    overall_allowed = is_trading_allowed()
+    lines.append(f"3️⃣ الخلاصة العامة is_trading_allowed(): {'✅ مسموح' if overall_allowed else '🛑 ممنوع'}\n")
+
+    if not overall_allowed:
+        lines.append("↳ طالما هذه البوابة العامة مغلقة، لن تفتح أي صفقة على أي رمز مهما كانت شروط الدخول متوفرة.\n")
+
+    active_symbols = [s for s, on in bot_state['active_symbols'].items() if on]
+    if not active_symbols:
+        lines.append("⚠️ لا يوجد أي رمز مفعّل حالياً في active_symbols.")
+        return "\n".join(lines)
+
+    for symbol in active_symbols:
+        sym_state = bot_state['symbol_state'][symbol]
+        lines.append(f"━━━━━━━━━━━━━━\n<b>{symbol}</b>")
+
+        cycle_active = sym_state.get('gann_cycle_active', False)
+        n_levels = len(sym_state.get('gann_levels', []))
+        lines.append(f"دورة جان نشطة: {'✅' if cycle_active else '🛑'}  |  عدد المستويات: {n_levels}")
+        if not cycle_active or n_levels == 0:
+            lines.append("↳ 🛑 السكانر بيتخطى هذا الرمز بالكامل (continue) لحد ما تبدأ دورة جديدة بمستويات.")
+            continue
+
+        flt_type = sym_state['trend_filter_type']
+        ttf = sym_state['trend_timeframe']
+        entry_mode = sym_state['gann_entry_mode']
+        lines.append(f"وضع الدخول: {entry_mode}  |  فلتر الاتجاه: {flt_type} ({ttf})")
+
+        macro_trend_up = None
+        if entry_mode == 'touch_trend':
+            p_vwap = sym_state['trend_vwap_period'] if flt_type == 'vwap' else 0
+            p_ema  = sym_state['trend_ema_period'] if flt_type == 'ema' else 0
+            max_period = max(p_vwap, p_ema, 100)
+            try:
+                trend_candles = await fetch_candles(symbol, ttf, count=max(max_period + 10, 120))
+            except Exception as e:
+                trend_candles = []
+                lines.append(f"🛑 فشل جلب بيانات الاتجاه ({ttf}): {e}")
+            if not trend_candles:
+                lines.append(f"🛑 لا توجد بيانات اتجاه ({ttf}) -- macro_trend_up سيبقى None وستُتجاهل كل الإشارات لكل الفريمات.")
+            else:
+                df_trend = pd.DataFrame(trend_candles)
+                current_trend_close = float(trend_candles[-1]['close'])
+                if flt_type == 'vwap':
+                    df_trend['Typical_Price'] = (df_trend['high'] + df_trend['low'] + df_trend['close']) / 3
+                    df_trend['VWAP'] = (df_trend['Typical_Price'] * df_trend['volume']).rolling(window=p_vwap).sum() / df_trend['volume'].rolling(window=p_vwap).sum()
+                    current_vwap = df_trend.iloc[-1]['VWAP']
+                    if pd.isna(current_vwap): current_vwap = current_trend_close
+                    macro_trend_up = current_trend_close > current_vwap
+                    lines.append(f"الاتجاه (VWAP{p_vwap}): إغلاق {current_trend_close:.2f} مقابل VWAP {current_vwap:.2f} -> {'صاعد ⬆️' if macro_trend_up else 'هابط ⬇️'}")
+                elif flt_type == 'ema':
+                    df_trend['EMA'] = df_trend['close'].ewm(span=p_ema, adjust=False).mean()
+                    current_ema = df_trend.iloc[-1]['EMA']
+                    macro_trend_up = current_trend_close > current_ema
+                    lines.append(f"الاتجاه (EMA{p_ema}): إغلاق {current_trend_close:.2f} مقابل EMA {current_ema:.2f} -> {'صاعد ⬆️' if macro_trend_up else 'هابط ⬇️'}")
+
+        levels = gann_active_levels(symbol)
+        margin = sym_state['gann_touch_margin_pts'] * SYMBOL_INFO[symbol]['pip_value']
+        enabled_tfs = [tf for tf, on in sym_state['gann_monitor_tfs'].items() if on]
+        if not enabled_tfs:
+            lines.append("🛑 لا يوجد أي فريم مفعّل في gann_monitor_tfs -- لن يتم فحص أي شيء.")
+            continue
+
+        for tf in enabled_tfs:
+            already_open = any(isinstance(v, dict) and v.get('tf') == tf for v in sym_state['gann_open_trades'].values())
+            if already_open:
+                lines.append(f"[{tf}] 🛑 يوجد صفقة مفتوحة بالفعل على هذا الفريم -- لن تُفتح صفقة ثانية.")
+                continue
+
+            try:
+                candles = await fetch_candles(symbol, tf, count=sym_state['gann_atr_period'] + 50)
+            except Exception as e:
+                lines.append(f"[{tf}] 🛑 فشل جلب الشموع: {e}")
+                continue
+            if not candles or len(candles) < 3:
+                lines.append(f"[{tf}] 🛑 بيانات غير كافية من OANDA.")
+                continue
+
+            live_px = float(candles[-1]['close'])
+            trend_up = True
+            if entry_mode == 'touch_trend':
+                if macro_trend_up is None:
+                    lines.append(f"[{tf}] 🛑 لا يمكن التحقق من الاتجاه (انظر أعلاه) -- الإشارات متجاهَلة.")
+                    continue
+                trend_up = macro_trend_up
+
+            nearest = None
+            for lv in levels:
+                combo_key = f"{lv['key']}_{tf}" if bot_state['prot_allow_multi_tf'] else lv['key']
+                status = sym_state['gann_level_status'].get(combo_key)
+                dist = abs(live_px - lv['price'])
+                is_buy = (lv['dir'] == 'dn')
+                blocked_by_trend = entry_mode == 'touch_trend' and ((is_buy and not trend_up) or (not is_buy and trend_up))
+                if nearest is None or dist < nearest['dist']:
+                    nearest = {'dist': dist, 'price': lv['price'], 'status': status, 'blocked_by_trend': blocked_by_trend, 'is_buy': is_buy}
+
+            if nearest is None:
+                lines.append(f"[{tf}] السعر: {live_px:.2f} -- لا توجد مستويات نشطة أصلاً.")
+                continue
+
+            within_margin = nearest['dist'] <= margin
+            reason_blocked = []
+            if nearest['status'] == 'used':
+                reason_blocked.append('المستوى مستخدم بالفعل')
+            if nearest['blocked_by_trend']:
+                reason_blocked.append('ممنوع باتجاه الترند')
+            if not within_margin:
+                nd = nearest['dist']
+                reason_blocked.append(f"بعيد عن الهامش ({nd:.3f} > {margin:.3f})")
+
+            status_icon = '✅ جاهز للدخول' if (within_margin and not reason_blocked) else '🛑 ' + ' | '.join(reason_blocked) if reason_blocked else '🟡 خارج الهامش'
+            lines.append(f"[{tf}] السعر: {live_px:.2f}  |  أقرب مستوى: {nearest['price']:.2f} (فرق {nearest['dist']:.3f})  |  {status_icon}")
+
+    return "\n".join(lines)
+
 async def gann_monitor_scanner() -> None:
     c_log('Gann live scanner started.')
     while True:
@@ -1536,11 +1697,6 @@ async def gann_monitor_scanner() -> None:
                         if macro_trend_up is None: continue 
                         trend_up = macro_trend_up
 
-                    # Damascus Time (UTC+3) Circuit Breaker
-                    dam_now = datetime.now(timezone.utc) + timedelta(hours=3)
-                    if dam_now.hour in [7, 8, 13]:
-                        continue
-
                     for lv in levels:
                         k = lv['key']; dir = lv['dir']
                         combo_key = f"{k}_{tf}" if bot_state['prot_allow_multi_tf'] else k
@@ -1819,12 +1975,6 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
 
                     for bar in m_window:
                         bar_close = float(bar['close']); bar_time = bar['time']
-                        
-                        # Damascus Time (UTC+3) Circuit Breaker
-                        dam_hour = (bar_time + timedelta(hours=3)).hour
-                        if dam_hour in [7, 8, 13]:
-                            continue
-
                         trend_up = True
                         if sym_state['gann_entry_mode'] == 'touch_trend':
                             trend_time = bar_time.floor(trend_freq)
@@ -2021,6 +2171,17 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
                 sig = all_signals[signal_idx]
                 signal_idx += 1
                 if current_day not in suspended_days:
+                    # DAM time-window filter (07:00-09:00, 13:00-14:00) --
+                    # this backtest engine has its own signal-admission
+                    # path and never calls is_trading_allowed()/_gann_open_
+                    # trade (that gate only exists in the live engine), so
+                    # the filter has to be re-applied here explicitly,
+                    # checked against the SIGNAL's own historical
+                    # timestamp rather than wall-clock time.
+                    if bot_state.get('prot_dam_time_filter', True):
+                        sig_dam_time = (sig['time'] + timedelta(hours=3)).time()
+                        if any(start <= sig_dam_time < end for start, end in _DAM_RESTRICTED_WINDOWS):
+                            continue
                     sig['sl_current'] = sig['sl_px']
                     sig['be_activated'] = False
                     open_trades.append(sig)
@@ -2242,6 +2403,28 @@ async def check_metaapi_status_command(chat_id: int):
 async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
     if d == 'check_metaapi_status':
         asyncio.create_task(check_metaapi_status_command(chat_id))
+        return
+    if d == 'run_diag':
+        async def _run_diag_task():
+            try:
+                report = await gann_run_diagnostics()
+                # Telegram hard-caps messages at 4096 chars; a multi-symbol,
+                # multi-timeframe report can exceed that easily. Split on
+                # line boundaries rather than sending an oversized message
+                # that would just fail outright.
+                lines = report.split('\n')
+                chunk = ""
+                for line in lines:
+                    if len(chunk) + len(line) + 1 > 3500:
+                        await send_tg_msg(chunk)
+                        chunk = ""
+                    chunk += line + "\n"
+                if chunk.strip():
+                    await send_tg_msg(chunk)
+            except Exception as e:
+                log_exception('gann_run_diagnostics', e)
+                await send_tg_msg(f"❌ فشل التشخيص: {e}")
+        asyncio.create_task(_run_diag_task())
         return
 
     sym = bot_state['ui_selected_symbol']
