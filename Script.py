@@ -334,7 +334,7 @@ bot_state: dict = {
     'status':           'RUNNING',
     'connection_state': 'RUNNING',
     'connection_state_reason': '',
-    'symbol':           'XAUUSDm',
+    'symbol':           'XAUUSD',
     'live_connected':   False,
     'connection_obj':   None,
     'chat_id':          None,
@@ -780,6 +780,23 @@ def _gann_fmt_levels_msg(symbol: str, close: float) -> str:
 _consecutive_real_order_failures = 0
 _REAL_ORDER_FAILURE_HALT_THRESHOLD = 3
 
+def _resolve_broker_symbol(symbol: str) -> str:
+    """Resolve the OANDA-format data-feed symbol (e.g. 'XAU_USD') to the
+    broker's actual MT5 symbol name for order execution. bot_state['symbol']
+    (settable via /setsymbol) is the primary source of truth since brokers
+    vary wildly in suffix conventions (XAUUSD, XAUUSDm, XAUUSD.a, GOLD...).
+    A hard safety-net mapping is applied on top: if the configured value is
+    missing or still looks like an unfixed raw OANDA-format symbol (i.e.
+    still has the underscore), fall back to the confirmed-correct stripped
+    form instead of sending a guaranteed-to-be-rejected symbol to the
+    broker. The rest of the bot's data engine, fetches, and logs MUST
+    continue using the OANDA-format symbol ('XAU_USD') -- this function's
+    return value is ONLY for the MetaAPI execution payload."""
+    configured = bot_state.get('symbol', '').strip()
+    if not configured or '_' in configured:
+        return symbol.replace('_', '')
+    return configured
+
 async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list, reason: str, tf: str) -> None:
     global _consecutive_real_order_failures
     sym_state = bot_state['symbol_state'][symbol]
@@ -810,6 +827,7 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
         is_real = sym_state.get('auto_trade', False)
         trade_id = f"sim_{int(datetime.now().timestamp())}_{tf}"
         real_msg = ""
+        execution_failed = False
 
         if is_real:
             # Source of truth: never spin up a second, ad-hoc MetaAPI
@@ -817,23 +835,25 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
             # startup isn't healthy, we do not know the true account state
             # well enough to safely fire a real order.
             if _metaapi_conn is None:
-                real_msg = "\n⚠️ لا يوجد اتصال MetaAPI صالح — تم تسجيل الصفقة وهمياً فقط."
+                real_msg = "\n⚠️ لا يوجد اتصال MetaAPI صالح — لم يتم فتح أي صفقة."
                 is_real = False
+                execution_failed = True
             else:
                 try:
-                    mt4_symbol = bot_state.get('symbol', symbol.replace('_', ''))
+                    broker_symbol = _resolve_broker_symbol(symbol)
                     if is_buy:
-                        res = await _metaapi_conn.create_market_buy_order(mt4_symbol, lot, stop_loss=sl, take_profit=tp)
+                        res = await _metaapi_conn.create_market_buy_order(broker_symbol, lot, stop_loss=sl, take_profit=tp)
                     else:
-                        res = await _metaapi_conn.create_market_sell_order(mt4_symbol, lot, stop_loss=sl, take_profit=tp)
+                        res = await _metaapi_conn.create_market_sell_order(broker_symbol, lot, stop_loss=sl, take_profit=tp)
 
                     trade_id = str(res.get('orderId', res.get('positionId', trade_id)))
                     real_msg = "\n🚀 <b>تم فتح الصفقة حقيقياً على حسابك!</b>"
                     _consecutive_real_order_failures = 0
                 except Exception as ex:
                     log_exception(f"_gann_open_trade real order [{symbol} {tf}]", ex)
-                    real_msg = f"\n❌ <b>فشل فتح الصفقة حقيقياً:</b> {ex}"
+                    real_msg = f"\n❌ <b>فشل فتح الصفقة حقيقياً:</b> {ex}\nلم يتم تتبعها كصفقة وهمية (لا يوجد تنفيذ فعلي)."
                     is_real = False
+                    execution_failed = True
                     _consecutive_real_order_failures += 1
                     if _consecutive_real_order_failures >= _REAL_ORDER_FAILURE_HALT_THRESHOLD:
                         await set_connection_state(
@@ -841,6 +861,22 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
                             f"{_consecutive_real_order_failures} consecutive real order failures "
                             f"(last: {ex}). Escalating to protect capital."
                         )
+
+        # Ghost-trade fix: a FAILED real-order attempt must never enter
+        # gann_open_trades -- it never had any exposure on the broker, so
+        # tracking it (even as a "simulated" fallback) meant the bot would
+        # later evaluate it against live price movement and report a
+        # fabricated WIN/LOSS for a trade that never existed. Genuine
+        # paper-trading (auto_trade was never enabled to begin with) is a
+        # completely different, intentional case and is still tracked.
+        if execution_failed:
+            bot_state['symbol_state'][symbol]['gann_level_status'][level['key']] = 'used'
+            await send_tg_msg(
+                f"<b>⏭️ [{symbol} - جان {tf}]</b>  {reason}\n"
+                f"المستوى: {level['price']:.2f}\n"
+                f"{real_msg}"
+            )
+            return
 
         bot_state['symbol_state'][symbol]['gann_open_trades'][trade_id] = {
             'tf': tf, 'is_buy': is_buy, 'entry': price, 'is_real': is_real, 'sl': sl, 'tp': tp,
