@@ -645,16 +645,23 @@ async def fetch_master_price(symbol: str) -> float | None:
     returned value for every enabled timeframe's touch-distance check.
 
     Why this exists: a timeframe's own last candle close is NOT "the
-    current price" for anything above 1m — a 30m candle's close can be up
+    current price" for anything above 1m -- a 30m candle's close can be up
     to ~30 minutes stale. Asking OANDA separately per-timeframe and using
     each tf's own close as "live price" is exactly what caused the same
     instant to read as e.g. 4067 on 1m and 4073 on 30m during a volatile
     spike, and it also multiplies OANDA requests per cycle (contributing
     to "Insufficient data from OANDA" failures under load). Timeframes
     should still be fetched separately for their own historical
-    closes/EMAs/ATR — just never for "what is the price right now".
+    closes/EMAs/ATR -- just never for "what is the price right now".
+
+    count=2 (not 1): OANDA's most recent candle for 'to=now' is very often
+    still the in-progress (incomplete) one, and fetch_candles() drops
+    incomplete candles entirely. count=1 would then frequently return an
+    EMPTY list and report "insufficient data" even though OANDA itself is
+    perfectly healthy. count=2 guarantees at least one genuinely
+    completed, very recent candle to use.
     """
-    mc = await fetch_candles(symbol, '1m', count=1)
+    mc = await fetch_candles(symbol, '1m', count=2)
     if not mc:
         c_log(f"fetch_master_price [{symbol}]: no 1m data from OANDA this cycle -- "
               f"skipping touch checks for this symbol rather than risk a stale/desynced price.")
@@ -1582,7 +1589,7 @@ async def gann_monitor_scanner() -> None:
                 sym_state = bot_state['symbol_state'][symbol]
                 
                 if bot_state.get('prot_cycle_inval', True) and sym_state.get('gann_close_used'):
-                    mc = await fetch_candles(symbol, '1m', count=1)
+                    mc = await fetch_candles(symbol, '1m', count=2)
                     if mc:
                         live_px = float(mc[-1]['close'])
                         dist = abs(live_px - sym_state['gann_close_used'])
