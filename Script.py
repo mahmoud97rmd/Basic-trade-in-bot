@@ -399,6 +399,11 @@ bot_state: dict = {
     'prot_daily_profit_usd':  150,
     'prot_true_sync': True,
     'prot_cost_be': True,
+    # Max allowed execution deviation (MetaApi "slippage", in broker points)
+    # for market orders. If the broker can't fill within this many points of
+    # our intended price, the order is rejected (ORDER_FILLING_FOK) instead
+    # of being executed 20 pips away.
+    'prot_max_slippage_points': 5,
     'prot_stale_filter': True,
     'prot_cycle_inval': True,
     'prot_cycle_inval_pts': 200,
@@ -841,17 +846,55 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
             else:
                 try:
                     broker_symbol = _resolve_broker_symbol(symbol)
-                    if is_buy:
-                        res = await _metaapi_conn.create_market_buy_order(broker_symbol, lot, stop_loss=sl, take_profit=tp)
-                    else:
-                        res = await _metaapi_conn.create_market_sell_order(broker_symbol, lot, stop_loss=sl, take_profit=tp)
 
-                    trade_id = str(res.get('orderId', res.get('positionId', trade_id)))
+                    # ── Slippage / Deviation control ──
+                    # Cap how far from our intended price the broker is allowed
+                    # to fill us. 'slippage' is in MetaApi "points" (broker tick
+                    # size units, i.e. the same unit as symbol digits — for a
+                    # 2-digit gold quote that's $0.01/point). ORDER_FILLING_FOK
+                    # ("fill or kill") means the whole order is rejected rather
+                    # than partially/badly filled if the broker can't honor it
+                    # within that deviation — this is what stops us from being
+                    # filled 20 pips away from our entry.
+                    max_slippage_points = int(bot_state.get('prot_max_slippage_points', 5))
+                    order_options = {
+                        'slippage': max_slippage_points,
+                        'fillingModes': ['ORDER_FILLING_FOK'],
+                    }
+
+                    if is_buy:
+                        res = await _metaapi_conn.create_market_buy_order(
+                            broker_symbol, lot, stop_loss=sl, take_profit=tp, options=order_options
+                        )
+                    else:
+                        res = await _metaapi_conn.create_market_sell_order(
+                            broker_symbol, lot, stop_loss=sl, take_profit=tp, options=order_options
+                        )
+
+                    # CRITICAL: history deals/reconciliation are keyed by
+                    # positionId, NOT orderId (they're different tickets in
+                    # MT5 — orderId is the pending/market order ticket,
+                    # positionId is the resulting open position's ticket).
+                    # Previously this preferred orderId, so the reconciliation
+                    # lookup below (which matches on positionId) never found
+                    # a match, silently fell back to a theoretical/estimated
+                    # PnL every time, and mislabeled it as the real MT5 profit.
+                    # positionId must be preferred here.
+                    trade_id = str(res.get('positionId', res.get('orderId', trade_id)))
                     real_msg = "\n🚀 <b>تم فتح الصفقة حقيقياً على حسابك!</b>"
                     _consecutive_real_order_failures = 0
                 except Exception as ex:
                     log_exception(f"_gann_open_trade real order [{symbol} {tf}]", ex)
-                    real_msg = f"\n❌ <b>فشل فتح الصفقة حقيقياً:</b> {ex}\nلم يتم تتبعها كصفقة وهمية (لا يوجد تنفيذ فعلي)."
+                    err_str = str(ex)
+                    # Give an explicit signal when the rejection was caused by
+                    # the deviation guard itself (requote / price moved beyond
+                    # our slippage tolerance), rather than a generic failure,
+                    # so it's obvious this is protective behavior, not a bug.
+                    if any(code in err_str for code in ('REQUOTE', 'PRICE_CHANGED', 'OFF_QUOTES')):
+                        real_msg = (f"\n🛑 <b>تم رفض الصفقة لتجاوز حد الانزلاق السعري "
+                                    f"({max_slippage_points} نقاط):</b> {ex}\nلم يتم التنفيذ لحمايتك من دخول سيء.")
+                    else:
+                        real_msg = f"\n❌ <b>فشل فتح الصفقة حقيقياً:</b> {ex}\nلم يتم تتبعها كصفقة وهمية (لا يوجد تنفيذ فعلي)."
                     is_real = False
                     execution_failed = True
                     _consecutive_real_order_failures += 1
@@ -1604,21 +1647,41 @@ async def gann_monitor_scanner() -> None:
                         if is_real and bot_state.get('prot_true_sync', True) and _metaapi_conn:
                             if tid not in actual_positions:
                                 # Pre-fetched history deals (outside the loop to prevent Rate Limit Suicide)
-                                exact_pnl = trade_pl # Fallback
+                                exact_pnl = trade_pl  # Estimate fallback only — NOT the real MT5 profit
+                                found_deal = False
                                 if history_deals_cache is not None:
                                     deal_pnl = 0.0
-                                    found_deal = False
+                                    # DEAL_ENTRY_OUT covers a normal full close; DEAL_ENTRY_OUT_BY
+                                    # covers "close by" an opposite position. Both are genuine
+                                    # closing deals and both must count, or partial-close /
+                                    # close-by trades will silently fall back to the estimate too.
                                     for d in history_deals_cache:
-                                        if str(d.get('positionId')) == str(tid) and d.get('entryType') == 'DEAL_ENTRY_OUT':
+                                        if (str(d.get('positionId')) == str(tid)
+                                                and d.get('entryType') in ('DEAL_ENTRY_OUT', 'DEAL_ENTRY_OUT_BY')):
                                             deal_pnl += _safe_float(d.get('profit')) + _safe_float(d.get('swap')) + _safe_float(d.get('commission'))
                                             found_deal = True
                                     if found_deal:
                                         exact_pnl = deal_pnl
                                         c_log(f"Reconciliation: Exact PnL for {tid} fetched from MT5: {exact_pnl}$")
-                                
+
                                 closed_ids.append(tid)
                                 bot_state['live_daily_realized'] += exact_pnl
-                                msg = f"🔔 <b>مزامنة: إغلاق صفقة [{symbol} - {tf}]</b>\nالربح الفعلي (MT5): {exact_pnl:.2f}$"
+
+                                if found_deal:
+                                    # This mirrors the true, realized, closed profit from MT5's
+                                    # own history (includes slippage, swap, commission) — never
+                                    # a cached floating/estimated value.
+                                    msg = f"🔔 <b>مزامنة: إغلاق صفقة [{symbol} - {tf}]</b>\nالربح الفعلي (MT5): {exact_pnl:.2f}$"
+                                else:
+                                    # MT5 history hasn't synced this deal yet (or lookup failed).
+                                    # Never present an unconfirmed estimate as "الربح الفعلي" —
+                                    # that's exactly how a fake/incorrect profit gets reported.
+                                    log_exception(f"Reconciliation MISS [{symbol}/{tid}]",
+                                                  Exception("closing deal not found in MT5 history; reporting estimate"))
+                                    msg = (f"🔔 <b>مزامنة: إغلاق صفقة [{symbol} - {tf}]</b>\n"
+                                           f"⚠️ ربح تقديري (لم تُؤكَّد بعد من سجل MT5): ~{exact_pnl:.2f}$\n"
+                                           f"سيتم تصحيح الرقم تلقائياً عند تأكيد الصفقة من السجل.")
+
                                 await send_tg_msg(msg)
                                 continue
                             else:
