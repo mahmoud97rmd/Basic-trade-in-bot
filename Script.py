@@ -1543,32 +1543,41 @@ async def gann_run_diagnostics() -> str:
                     continue
                 trend_up = macro_trend_up
 
+            # Only trend-compatible levels can actually produce a trade in
+            # touch_trend mode -- an against-trend level being the closest
+            # one is meaningless noise (it will ALWAYS show "blocked by
+            # trend" and tells you nothing about whether a real opportunity
+            # is nearby). Restrict "nearest" to levels the bot would
+            # actually be willing to act on.
+            if entry_mode == 'touch_trend' and macro_trend_up is not None:
+                directional_levels = [lv for lv in levels if (lv['dir'] == 'dn') == trend_up]
+            else:
+                directional_levels = levels
+
             nearest = None
-            for lv in levels:
+            for lv in directional_levels:
                 combo_key = f"{lv['key']}_{tf}" if bot_state['prot_allow_multi_tf'] else lv['key']
                 status = sym_state['gann_level_status'].get(combo_key)
                 dist = abs(live_px - lv['price'])
                 is_buy = (lv['dir'] == 'dn')
-                blocked_by_trend = entry_mode == 'touch_trend' and ((is_buy and not trend_up) or (not is_buy and trend_up))
                 if nearest is None or dist < nearest['dist']:
-                    nearest = {'dist': dist, 'price': lv['price'], 'status': status, 'blocked_by_trend': blocked_by_trend, 'is_buy': is_buy}
+                    nearest = {'dist': dist, 'price': lv['price'], 'status': status, 'is_buy': is_buy}
 
             if nearest is None:
-                lines.append(f"[{tf}] السعر: {live_px:.2f} -- لا توجد مستويات نشطة أصلاً.")
+                lines.append(f"[{tf}] السعر: {live_px:.2f} -- لا توجد مستويات متوافقة مع الترند الحالي.")
                 continue
 
             within_margin = nearest['dist'] <= margin
             reason_blocked = []
             if nearest['status'] == 'used':
                 reason_blocked.append('المستوى مستخدم بالفعل')
-            if nearest['blocked_by_trend']:
-                reason_blocked.append('ممنوع باتجاه الترند')
             if not within_margin:
                 nd = nearest['dist']
                 reason_blocked.append(f"بعيد عن الهامش ({nd:.3f} > {margin:.3f})")
 
-            status_icon = '✅ جاهز للدخول' if (within_margin and not reason_blocked) else '🛑 ' + ' | '.join(reason_blocked) if reason_blocked else '🟡 خارج الهامش'
-            lines.append(f"[{tf}] السعر: {live_px:.2f}  |  أقرب مستوى: {nearest['price']:.2f} (فرق {nearest['dist']:.3f})  |  {status_icon}")
+            status_icon = '✅ جاهز للدخول' if (within_margin and not reason_blocked) else ('🛑 ' + ' | '.join(reason_blocked) if reason_blocked else '🟡 خارج الهامش')
+            dir_lbl = 'دعم/شراء 🟢' if nearest['is_buy'] else 'مقاومة/بيع 🔴'
+            lines.append(f"[{tf}] السعر: {live_px:.2f}  |  أقرب مستوى موافق للترند [{dir_lbl}]: {nearest['price']:.2f} (فرق {nearest['dist']:.3f})  |  {status_icon}")
 
     return "\n".join(lines)
 
