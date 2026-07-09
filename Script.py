@@ -404,6 +404,11 @@ bot_state: dict = {
     # our intended price, the order is rejected (ORDER_FILLING_FOK) instead
     # of being executed 20 pips away.
     'prot_max_slippage_points': 5,
+    # Hard cap on simultaneously open trades per symbol, regardless of how
+    # many timeframes are enabled or how many levels got touched at once.
+    # When reached, remaining timeframes are skipped for that scan cycle
+    # only -- already-open trades are left alone (Option A).
+    'prot_max_concurrent_trades': 4,
     'prot_stale_filter': True,
     'prot_cycle_inval': True,
     'prot_cycle_inval_pts': 200,
@@ -849,8 +854,54 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
         return
 
     try:
-        price = float(candles[-1]['close'])
+        # ── Re-verify price at execution time (Point 3) ──
+        # Trades within the same scan cycle open sequentially, one timeframe
+        # at a time. During a fast/volatile move, the price can drift far
+        # from the level between the first and last order in the same
+        # batch (this is exactly how one support touch ended up opening
+        # entries $1-9 apart from each other). Re-fetch a fresh price right
+        # before this specific order goes out, and re-check it's still
+        # actually near the level -- not the stale master_px from when the
+        # cycle started.
+        fresh_px = await fetch_master_price(symbol)
+        margin = sym_state['gann_touch_margin_pts'] * SYMBOL_INFO[symbol]['pip_value']
+        if fresh_px is None or abs(fresh_px - level['price']) > margin:
+            bot_state['symbol_state'][symbol]['gann_level_status'][level['key']] = 'used'
+            await send_tg_msg(
+                f"<b>⏭️ [{symbol} - جان {tf}]</b>  {reason}\n"
+                f"المستوى: {level['price']:.2f}\n"
+                f"تم تجاهل الفريم — السعر ابتعد عن المستوى أثناء التنفيذ "
+                f"({'لا يمكن التأكد من السعر الحالي' if fresh_px is None else f'{fresh_px:.2f}'}) ولم يعد لمساً حقيقياً."
+            )
+            return
+
+        price = fresh_px
         tp, sl = _gann_calc_tpsl(symbol, price, is_buy, candles, tf=tf)
+
+        # ── Pre-send sanity check (Point 4) ──
+        # If price already moved past where TP or SL would sit before we
+        # even send the order, the opportunity is gone (or would produce
+        # nonsensical/rejected stops, e.g. "Invalid stops"). Better to skip
+        # cleanly here than let the broker reject it after the fact.
+        if is_buy and (price >= tp or price <= sl):
+            bot_state['symbol_state'][symbol]['gann_level_status'][level['key']] = 'used'
+            await send_tg_msg(
+                f"<b>⏭️ [{symbol} - جان {tf}]</b>  {reason}\n"
+                f"المستوى: {level['price']:.2f}\n"
+                f"تم إلغاء الأمر قبل الإرسال — السعر الحالي ({price:.2f}) تجاوز فعلياً "
+                f"مستوى TP/SL المحسوب (TP:{tp} SL:{sl})."
+            )
+            return
+        if not is_buy and (price <= tp or price >= sl):
+            bot_state['symbol_state'][symbol]['gann_level_status'][level['key']] = 'used'
+            await send_tg_msg(
+                f"<b>⏭️ [{symbol} - جان {tf}]</b>  {reason}\n"
+                f"المستوى: {level['price']:.2f}\n"
+                f"تم إلغاء الأمر قبل الإرسال — السعر الحالي ({price:.2f}) تجاوز فعلياً "
+                f"مستوى TP/SL المحسوب (TP:{tp} SL:{sl})."
+            )
+            return
+
         lot = sym_state['lot_size']
         tp_pts = _gann_tf_tp(symbol, tf); sl_pts = _gann_tf_sl(symbol, tf)
 
@@ -1651,12 +1702,31 @@ async def gann_monitor_scanner() -> None:
                     history_deals_cache = None
                     missing_tids = [t for t, v in sym_state['gann_open_trades'].items() if v.get('is_real') and t not in actual_positions]
                     if missing_tids and _metaapi_conn:
-                        try:
-                            from datetime import timedelta
-                            start_time = datetime.now(timezone.utc) - timedelta(days=2)
-                            history_deals_cache = await _metaapi_conn.get_history_deals_by_time_range(start_time, datetime.now(timezone.utc))
-                        except Exception as e:
-                            log_exception(f"get_history_deals_by_time_range [{symbol}]", e)
+                        # Retry with backoff (Point 6): MetaAPI's own history sync can
+                        # lag a few seconds behind the actual broker-side close,
+                        # especially when several positions close in the same tick
+                        # (like a mass level-touch closing many trades at once).
+                        # Try immediately first (no delay -- the common/fast case
+                        # where sync already caught up costs nothing extra), then
+                        # back off 3s, then 5s, re-checking each time whether every
+                        # missing trade's closing deal has shown up yet. Only after
+                        # all three attempts do we fall back to the estimate.
+                        from datetime import timedelta
+                        start_time = datetime.now(timezone.utc) - timedelta(days=2)
+                        for attempt_i, delay in enumerate((0, 3, 5)):
+                            if delay:
+                                await asyncio.sleep(delay)
+                            try:
+                                history_deals_cache = await _metaapi_conn.get_history_deals_by_time_range(start_time, datetime.now(timezone.utc))
+                            except Exception as e:
+                                log_exception(f"get_history_deals_by_time_range [{symbol}] attempt {attempt_i+1}/3", e)
+                                continue
+                            found_now = {
+                                str(d.get('positionId')) for d in history_deals_cache
+                                if d.get('entryType') in ('DEAL_ENTRY_OUT', 'DEAL_ENTRY_OUT_BY')
+                            }
+                            if all(str(t) in found_now for t in missing_tids):
+                                break  # every missing trade's closing deal is visible -- no need to keep waiting
                     
                     for tid, tr in list(sym_state['gann_open_trades'].items()):
                         is_buy = tr.get('is_buy')
@@ -1847,8 +1917,28 @@ async def gann_monitor_scanner() -> None:
                 if master_px is None:
                     continue
 
+                cap_warned_this_cycle = False
+
                 for tf in enabled_tfs:
                     if any(isinstance(v, dict) and v.get('tf') == tf for v in sym_state['gann_open_trades'].values()) or tf in sym_state['gann_open_trades'].values(): continue 
+
+                    # ── Max concurrent trades cap (per symbol) ──
+                    # A single level touch used to be able to open one trade
+                    # PER enabled timeframe (e.g. 8 simultaneous BUYs off one
+                    # support touch). Cap the damage: once this symbol has
+                    # `prot_max_concurrent_trades` trades open, stop scanning
+                    # further timeframes for it THIS CYCLE. Already-open
+                    # trades are left alone; nothing is force-closed.
+                    max_concurrent = int(bot_state.get('prot_max_concurrent_trades', 4))
+                    open_count = sum(1 for v in sym_state['gann_open_trades'].values() if isinstance(v, dict))
+                    if open_count >= max_concurrent:
+                        if not cap_warned_this_cycle:
+                            await send_tg_msg(
+                                f"⏸️ <b>[{symbol}]</b> تم بلوغ الحد الأقصى ({max_concurrent} صفقات مفتوحة) — "
+                                f"تم تجاهل باقي الفريمات لهذه الدورة (الصفقات المفتوحة لم تُغلق)."
+                            )
+                            cap_warned_this_cycle = True
+                        break
 
                     need = sym_state['gann_atr_period'] + 50
                     candles = await fetch_candles(symbol, tf, count=need)
