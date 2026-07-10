@@ -893,7 +893,7 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
         fresh_px = await fetch_master_price(symbol)
         margin = sym_state['gann_touch_margin_pts'] * SYMBOL_INFO[symbol]['pip_value']
         if fresh_px is None or abs(fresh_px - level['price']) > margin:
-            bot_state['symbol_state'][symbol]['gann_level_status'][level['key']] = 'used'
+            # bot_state['symbol_state'][symbol]['gann_level_status'][level['key']] = 'used' # FIX: Do not burn level on drift
             # Detail requested: exactly how much the price moved, over how
             # long, and what the pre-existing code threshold is (the touch
             # margin, gann_touch_margin_pts -- unchanged, no new number
@@ -930,7 +930,7 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
         # nonsensical/rejected stops, e.g. "Invalid stops"). Better to skip
         # cleanly here than let the broker reject it after the fact.
         if is_buy and (price >= tp or price <= sl):
-            bot_state['symbol_state'][symbol]['gann_level_status'][level['key']] = 'used'
+            # bot_state['symbol_state'][symbol]['gann_level_status'][level['key']] = 'used' # FIX: Do not burn level on TP/SL overlap
             await send_tg_msg(
                 f"<b>⏭️ [{symbol} - جان {tf}]</b>  {reason}\n"
                 f"المستوى: {level['price']:.2f}\n"
@@ -939,7 +939,7 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
             )
             return
         if not is_buy and (price <= tp or price >= sl):
-            bot_state['symbol_state'][symbol]['gann_level_status'][level['key']] = 'used'
+            # bot_state['symbol_state'][symbol]['gann_level_status'][level['key']] = 'used' # FIX: Do not burn level on TP/SL overlap
             await send_tg_msg(
                 f"<b>⏭️ [{symbol} - جان {tf}]</b>  {reason}\n"
                 f"المستوى: {level['price']:.2f}\n"
@@ -1040,7 +1040,7 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
         # paper-trading (auto_trade was never enabled to begin with) is a
         # completely different, intentional case and is still tracked.
         if execution_failed:
-            bot_state['symbol_state'][symbol]['gann_level_status'][level['key']] = 'used'
+            # bot_state['symbol_state'][symbol]['gann_level_status'][level['key']] = 'used' # FIX: Do not burn level on execution failure
             await send_tg_msg(
                 f"<b>⏭️ [{symbol} - جان {tf}]</b>  {reason}\n"
                 f"المستوى: {level['price']:.2f}\n"
@@ -1052,7 +1052,8 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
             'tf': tf, 'is_buy': is_buy, 'entry': price, 'is_real': is_real, 'sl': sl, 'tp': tp,
             'be_trigger': (price + (tp - price)/2) if is_buy else (price - (price - tp)/2) # simplified BE trigger
         }
-        bot_state['symbol_state'][symbol]['gann_level_status'][level['key']] = 'used'
+        combo_key = f"{level['key']}_{tf}" if bot_state.get('prot_allow_multi_tf', True) else level['key']
+        bot_state['symbol_state'][symbol]['gann_level_status'][combo_key] = 'used'
         await save_bot_persistence()
 
         await send_tg_msg(
@@ -1064,7 +1065,7 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
         )
     except Exception as e:
         log_exception(f"_gann_open_trade [{symbol} {tf}]", e)
-        bot_state['symbol_state'][symbol]['gann_level_status'][level['key']] = 'used'
+        # bot_state['symbol_state'][symbol]['gann_level_status'][level['key']] = 'used' # FIX: Do not burn level on exception
         await send_tg_msg(f"<b>❌ فشل تنفيذ الصفقة [{symbol} - جان {tf}]</b>\nالمستوى: {level['price']:.5f}\n{e}")
 
 # ─────────────────────────────────────────────────────────────
