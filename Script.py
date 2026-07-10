@@ -793,7 +793,7 @@ def _gann_atr(candles: list, period: int) -> float | None:
     val = tr.rolling(period).mean().iloc[-1]
     return float(val) if not pd.isna(val) else None
 
-def _gann_calc_tpsl(symbol: str, entry: float, level_price: float, is_buy: bool, candles: list, tf: str = '') -> tuple[float, float]:
+def _gann_calc_tpsl(symbol: str, entry: float, is_buy: bool, candles: list, tf: str = '') -> tuple[float, float]:
     sym_state = bot_state['symbol_state'][symbol]
     pv = SYMBOL_INFO[symbol]['pip_value']
     prec = SYMBOL_INFO[symbol]['prec']
@@ -805,8 +805,8 @@ def _gann_calc_tpsl(symbol: str, entry: float, level_price: float, is_buy: bool,
     else:
         sl_dist = _gann_tf_sl(symbol, tf) * pv
         tp_dist = _gann_tf_tp(symbol, tf) * pv
-    if is_buy: return round(entry + tp_dist, prec), round(level_price - sl_dist, prec)
-    return round(entry - tp_dist, prec), round(level_price + sl_dist, prec)
+    if is_buy: return round(entry + tp_dist, prec), round(entry - sl_dist, prec)
+    return round(entry - tp_dist, prec), round(entry + sl_dist, prec)
 
 async def _gann_fetch_last_closed_anchor(symbol: str) -> dict | None:
     anchor_tf = bot_state.get('gann_anchor_tf', '1h')
@@ -922,7 +922,7 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
             return
 
         price = fresh_px
-        tp, sl = _gann_calc_tpsl(symbol, price, level['price'], is_buy, candles, tf=tf)
+        tp, sl = _gann_calc_tpsl(symbol, price, is_buy, candles, tf=tf)
 
         # ── Pre-send sanity check (Point 4) ──
         # If price already moved past where TP or SL would sit before we
