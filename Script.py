@@ -14,6 +14,7 @@ v9.4 changes vs v8.9 (see PATCH_NOTES.md shipped alongside this file):
 import asyncio
 import logging
 import traceback
+import time
 import aiohttp
 import os
 import sys
@@ -39,6 +40,21 @@ def log_exception(context: str, exc: Exception) -> None:
     """Zero-tolerance logging: every caught exception in a critical path gets
     a full traceback attached to the log line, not just str(e)."""
     logger.error("EXCEPTION in %s: %s\n%s", context, exc, traceback.format_exc())
+
+_DIAG_LOG_MAX_ENTRIES = 50000  # ~generous cap; trimmed on every append
+
+def _diag_log_add(entry: dict) -> None:
+    """Append one row to the rolling live-scan diagnostic log (see
+    bot_state['diag_log']). This is what /export_diag_excel dumps -- it's
+    the ONLY place that records the *silent* skip reasons (insufficient
+    candle data, cap reached, trend unknown, etc.) that never get a
+    Telegram message of their own, so the operator can reconstruct exactly
+    what the scanner saw/did on every (symbol, timeframe, cycle), not just
+    a point-in-time snapshot."""
+    log = bot_state.setdefault('diag_log', [])
+    log.append(entry)
+    if len(log) > _DIAG_LOG_MAX_ENTRIES:
+        del log[: len(log) - _DIAG_LOG_MAX_ENTRIES]
 
 # -----------------------------------------------------------------
 # CONFIGURATION
@@ -240,7 +256,10 @@ async def save_bot_persistence() -> None:
                               # stale value loaded from an old persistence file used to silently
                               # kill the entire scanner/cycle-manager/reconciliation loop with
                               # zero error message. Never restore it; always fixed at 'RUNNING'.
-                              'status'}
+                              'status',
+                              # Diagnostic-only rolling buffer -- large, purely informational,
+                              # and reset-on-restart is fine. Never persist or reload it.
+                              'diag_log'}
 
         symbol_snapshot = {}
         for sym in bot_state['active_symbols']:
@@ -287,7 +306,8 @@ def load_bot_persistence():
                               # stale value loaded from an old persistence file used to silently
                               # kill the entire scanner/cycle-manager/reconciliation loop with
                               # zero error message. Never restore it; always fixed at 'RUNNING'.
-                              'status'}
+                              'status',
+                              'diag_log'}
         for k, v in data.items():
             # Only restore keys that already exist in bot_state's default
             # shape -- never let a saved file inject brand-new top-level
@@ -409,6 +429,11 @@ bot_state: dict = {
     # When reached, remaining timeframes are skipped for that scan cycle
     # only -- already-open trades are left alone (Option A).
     'prot_max_concurrent_trades': 4,
+    # Rolling in-memory log of every (symbol, timeframe) scan decision made
+    # by the live scanner -- NOT just the instantaneous /diagnose snapshot.
+    # Deliberately excluded from persistence (see TOP_LEVEL_EXCLUDE) since
+    # it's diagnostic-only and would otherwise bloat the save file.
+    'diag_log': [],
     'prot_stale_filter': True,
     'prot_cycle_inval': True,
     'prot_cycle_inval_pts': 200,
@@ -819,6 +844,7 @@ def _gann_fmt_levels_msg(symbol: str, close: float) -> str:
 
 _consecutive_real_order_failures = 0
 _REAL_ORDER_FAILURE_HALT_THRESHOLD = 3
+_last_scanner_error_alert_ts = 0.0
 
 def _resolve_broker_symbol(symbol: str) -> str:
     """Resolve the OANDA-format data-feed symbol (e.g. 'XAU_USD') to the
@@ -837,7 +863,8 @@ def _resolve_broker_symbol(symbol: str) -> str:
         return symbol.replace('_', '')
     return configured
 
-async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list, reason: str, tf: str) -> None:
+async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list, reason: str, tf: str,
+                            initial_px: float = None, detect_time: datetime = None) -> None:
     global _consecutive_real_order_failures
     sym_state = bot_state['symbol_state'][symbol]
 
@@ -867,11 +894,30 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
         margin = sym_state['gann_touch_margin_pts'] * SYMBOL_INFO[symbol]['pip_value']
         if fresh_px is None or abs(fresh_px - level['price']) > margin:
             bot_state['symbol_state'][symbol]['gann_level_status'][level['key']] = 'used'
+            # Detail requested: exactly how much the price moved, over how
+            # long, and what the pre-existing code threshold is (the touch
+            # margin, gann_touch_margin_pts -- unchanged, no new number
+            # invented) that this movement exceeded.
+            elapsed_s = (datetime.now(timezone.utc) - detect_time).total_seconds() if detect_time else None
+            drift = abs(fresh_px - initial_px) if (fresh_px is not None and initial_px is not None) else None
+            detail_lines = []
+            if drift is not None:
+                margin_pts = sym_state['gann_touch_margin_pts']
+                detail_lines.append(
+                    f"الحركة الفعلية منذ اكتشاف اللمس: {drift:.3f} ({drift / SYMBOL_INFO[symbol]['pip_value']:.1f} نقطة)"
+                )
+                detail_lines.append(
+                    f"الحد المسموح به مسبقاً بالكود (هامش اللمس gann_touch_margin_pts): {margin_pts} نقطة ({margin:.3f})"
+                )
+            if elapsed_s is not None:
+                detail_lines.append(f"الفجوة الزمنية بين الاكتشاف والتنفيذ: {elapsed_s:.1f} ثانية")
+            detail_block = ("\n" + "\n".join(detail_lines)) if detail_lines else ""
             await send_tg_msg(
                 f"<b>⏭️ [{symbol} - جان {tf}]</b>  {reason}\n"
                 f"المستوى: {level['price']:.2f}\n"
                 f"تم تجاهل الفريم — السعر ابتعد عن المستوى أثناء التنفيذ "
                 f"({'لا يمكن التأكد من السعر الحالي' if fresh_px is None else f'{fresh_px:.2f}'}) ولم يعد لمساً حقيقياً."
+                f"{detail_block}"
             )
             return
 
@@ -1098,6 +1144,7 @@ def get_main_keyboard() -> dict:
     return {'inline_keyboard': [
         [{'text': '🔌 فحص حالة حساب MetaAPI', 'callback_data': 'check_metaapi_status'}],
         [{'text': '🩺 تشخيص: ليه مفيش صفقات؟', 'callback_data': 'run_diag'}],
+        [{'text': '📊 تصدير سجل تشخيص تفصيلي (Excel)', 'callback_data': 'export_diag_excel'}],
         [{'text': '🔓 استئناف يدوي بعد HALT (بعد التأكد من الحساب)', 'callback_data': 'manual_resume_step1'}],
         [{'text': '📐 محرك جان (الاستراتيجية)', 'callback_data': 'menu_gann'}],
         [{'text': '🛡️ إعدادات الحماية', 'callback_data': 'menu_protection'}],
@@ -1581,7 +1628,57 @@ async def gann_run_diagnostics() -> str:
 
     return "\n".join(lines)
 
+async def export_diag_log_excel() -> None:
+    """Export the FULL rolling diagnostic log (bot_state['diag_log']) to an
+    .xlsx file and send it via Telegram. Unlike /diagnose (a single
+    point-in-time snapshot), this covers every (symbol, timeframe) decision
+    the live scanner made since the bot last restarted -- including the
+    previously-silent skip reasons (insufficient OANDA candles, trend
+    undetermined, cap reached, already open) that never got their own
+    Telegram message.
+    """
+    log = list(bot_state.get('diag_log', []))
+    if not log:
+        await send_tg_msg("لا يوجد سجل تشخيص محفوظ بعد (السجل يبدأ بالتجمع فور بدء تشغيل البوت).")
+        return
+
+    df = pd.DataFrame(log)
+    if 'ts' in df.columns:
+        df['الوقت (DAM)'] = df['ts'].apply(lambda t: _utc_to_dam(t).strftime('%Y-%m-%d %H:%M:%S') if pd.notna(t) else '')
+        df = df.drop(columns=['ts'])
+
+    # Friendlier column order/names, but keep every raw field -- nothing summarized away.
+    preferred_order = ['الوقت (DAM)', 'symbol', 'tf', 'master_px', 'trend_up', 'margin',
+                        'nearest_compatible_level', 'nearest_dist', 'within_margin',
+                        'touch_attempted', 'skip_reason']
+    cols = [c for c in preferred_order if c in df.columns] + [c for c in df.columns if c not in preferred_order]
+    df = df[cols]
+
+    fname = f"DiagLog_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.xlsx"
+    try:
+        with pd.ExcelWriter(fname, engine='openpyxl') as writer:
+            if 'symbol' in df.columns:
+                for sym in sorted(df['symbol'].dropna().unique()):
+                    sheet_name = str(sym)[:31]  # Excel sheet name hard limit
+                    df[df['symbol'] == sym].to_excel(writer, sheet_name=sheet_name, index=False)
+            else:
+                df.to_excel(writer, sheet_name='diag_log', index=False)
+
+        first_ts = _utc_to_dam(log[0]['ts']).strftime('%Y-%m-%d %H:%M') if log[0].get('ts') else '?'
+        last_ts = _utc_to_dam(log[-1]['ts']).strftime('%Y-%m-%d %H:%M') if log[-1].get('ts') else '?'
+        await send_tg_document(
+            fname,
+            f"📊 <b>سجل تشخيص تفصيلي كامل</b>\n"
+            f"{len(log)} سطر (قرار فحص) — من {first_ts} إلى {last_ts} (توقيت دمشق)\n"
+            f"كل سطر = قرار واحد للسكانر الحي لكل (رمز، فريم) بكل دورة فحص، بما فيها أسباب "
+            f"التجاهل التي لم تُرسَل كرسالة تيليجرام من قبل."
+        )
+    finally:
+        if os.path.exists(fname):
+            os.remove(fname)
+
 async def gann_monitor_scanner() -> None:
+    global _last_scanner_error_alert_ts
     c_log('Gann live scanner started.')
     while True:
         try:
@@ -1879,109 +1976,173 @@ async def gann_monitor_scanner() -> None:
                 continue
 
             for symbol in active_symbols:
-                sym_state = bot_state['symbol_state'][symbol]
+                try:
+                    sym_state = bot_state['symbol_state'][symbol]
 
-                flt_type = sym_state['trend_filter_type']
-                ttf = sym_state['trend_timeframe']
-                enabled_tfs = [tf for tf, on in sym_state['gann_monitor_tfs'].items() if on]
-                if not sym_state['gann_cycle_active'] or not sym_state['gann_levels']:
-                    continue
+                    flt_type = sym_state['trend_filter_type']
+                    ttf = sym_state['trend_timeframe']
+                    enabled_tfs = [tf for tf, on in sym_state['gann_monitor_tfs'].items() if on]
+                    if not sym_state['gann_cycle_active'] or not sym_state['gann_levels']:
+                        continue
 
-                macro_trend_up = None
-                if sym_state['gann_entry_mode'] == 'touch_trend':
-                    p_vwap = sym_state['trend_vwap_period'] if flt_type == 'vwap' else 0
-                    p_ema  = sym_state['trend_ema_period'] if flt_type == 'ema' else 0
-                    max_period = max(p_vwap, p_ema, 100)
-                    
-                    trend_candles = await fetch_candles(symbol, ttf, count=max(max_period+10, 120))
-                    if trend_candles:
-                        df_trend = pd.DataFrame(trend_candles)
-                        current_trend_close = float(trend_candles[-1]['close'])
-                        
-                        if flt_type == 'vwap':
-                            df_trend['Typical_Price'] = (df_trend['high'] + df_trend['low'] + df_trend['close']) / 3
-                            df_trend['VWAP'] = (df_trend['Typical_Price'] * df_trend['volume']).rolling(window=p_vwap).sum() / df_trend['volume'].rolling(window=p_vwap).sum()
-                            current_vwap = df_trend.iloc[-1]['VWAP']
-                            if pd.isna(current_vwap): current_vwap = current_trend_close
-                            
-                        if flt_type == 'ema':
-                            df_trend['EMA'] = df_trend['close'].ewm(span=p_ema, adjust=False).mean()
-                            current_ema = df_trend.iloc[-1]['EMA']
-
-                        if flt_type == 'vwap':
-                            macro_trend_up = (current_trend_close > current_vwap)
-                        elif flt_type == 'ema':
-                            macro_trend_up = (current_trend_close > current_ema)
-
-                levels      = gann_active_levels(symbol)
-                margin      = sym_state['gann_touch_margin_pts'] * SYMBOL_INFO[symbol]['pip_value']
-
-                # ── Single Source of Truth for the current price ──
-                # Fetched ONCE per symbol per cycle here, and reused for every
-                # enabled timeframe below. Per-tf candle closes are only used
-                # for their own historical/ATR context (in _gann_open_trade),
-                # never as "the current price" -- that's what caused 1m and
-                # 30m to disagree on what "now" costs during a spike.
-                master_px = await fetch_master_price(symbol)
-                if master_px is None:
-                    continue
-
-                cap_warned_this_cycle = False
-
-                for tf in enabled_tfs:
-                    if any(isinstance(v, dict) and v.get('tf') == tf for v in sym_state['gann_open_trades'].values()) or tf in sym_state['gann_open_trades'].values(): continue 
-
-                    # ── Max concurrent trades cap (per symbol) ──
-                    # A single level touch used to be able to open one trade
-                    # PER enabled timeframe (e.g. 8 simultaneous BUYs off one
-                    # support touch). Cap the damage: once this symbol has
-                    # `prot_max_concurrent_trades` trades open, stop scanning
-                    # further timeframes for it THIS CYCLE. Already-open
-                    # trades are left alone; nothing is force-closed.
-                    max_concurrent = int(bot_state.get('prot_max_concurrent_trades', 4))
-                    open_count = sum(1 for v in sym_state['gann_open_trades'].values() if isinstance(v, dict))
-                    if open_count >= max_concurrent:
-                        if not cap_warned_this_cycle:
-                            await send_tg_msg(
-                                f"⏸️ <b>[{symbol}]</b> تم بلوغ الحد الأقصى ({max_concurrent} صفقات مفتوحة) — "
-                                f"تم تجاهل باقي الفريمات لهذه الدورة (الصفقات المفتوحة لم تُغلق)."
-                            )
-                            cap_warned_this_cycle = True
-                        break
-
-                    need = sym_state['gann_atr_period'] + 50
-                    candles = await fetch_candles(symbol, tf, count=need)
-                    if not candles or len(candles) < 3: continue
-                    live_px = master_px  # unified real-time price, NOT candles[-1]['close']
-
-                    trend_up = True
+                    macro_trend_up = None
                     if sym_state['gann_entry_mode'] == 'touch_trend':
-                        if macro_trend_up is None: continue 
-                        trend_up = macro_trend_up
-
-                    for lv in levels:
-                        k = lv['key']; dir = lv['dir']
-                        combo_key = f"{k}_{tf}" if bot_state['prot_allow_multi_tf'] else k
-                        status = sym_state['gann_level_status'].get(combo_key)
-                        if status == 'used': continue
-
-                        is_buy = (dir == 'dn')
+                        p_vwap = sym_state['trend_vwap_period'] if flt_type == 'vwap' else 0
+                        p_ema  = sym_state['trend_ema_period'] if flt_type == 'ema' else 0
+                        max_period = max(p_vwap, p_ema, 100)
+                    
+                        trend_candles = await fetch_candles(symbol, ttf, count=max(max_period+10, 120))
+                        if trend_candles:
+                            df_trend = pd.DataFrame(trend_candles)
+                            current_trend_close = float(trend_candles[-1]['close'])
                         
-                        if sym_state['gann_entry_mode'] == 'touch_trend':
-                            if is_buy and not trend_up: continue
-                            if not is_buy and trend_up: continue
+                            if flt_type == 'vwap':
+                                df_trend['Typical_Price'] = (df_trend['high'] + df_trend['low'] + df_trend['close']) / 3
+                                df_trend['VWAP'] = (df_trend['Typical_Price'] * df_trend['volume']).rolling(window=p_vwap).sum() / df_trend['volume'].rolling(window=p_vwap).sum()
+                                current_vwap = df_trend.iloc[-1]['VWAP']
+                                if pd.isna(current_vwap): current_vwap = current_trend_close
+                            
+                            if flt_type == 'ema':
+                                df_trend['EMA'] = df_trend['close'].ewm(span=p_ema, adjust=False).mean()
+                                current_ema = df_trend.iloc[-1]['EMA']
 
-                        if abs(live_px - lv['price']) <= margin:
-                            if flt_type == 'vwap': flt_label = f"VWAP={sym_state['trend_vwap_period']}\n"
-                            elif flt_type == 'ema': flt_label = f"EMA={sym_state['trend_ema_period']}\n"
-                            else: flt_label = f"VWAP+EMA"
-                            
-                            reason = f"لمس دعم 🟢 (مع {flt_label}_{ttf.upper()})" if is_buy else f"لمس مقاومة 🔴 (مع {flt_label}_{ttf.upper()})\n"
-                            await _gann_open_trade(symbol, is_buy, lv, candles, reason=reason, tf=tf)
+                            if flt_type == 'vwap':
+                                macro_trend_up = (current_trend_close > current_vwap)
+                            elif flt_type == 'ema':
+                                macro_trend_up = (current_trend_close > current_ema)
+
+                    levels      = gann_active_levels(symbol)
+                    margin      = sym_state['gann_touch_margin_pts'] * SYMBOL_INFO[symbol]['pip_value']
+
+                    # ── Single Source of Truth for the current price ──
+                    # Fetched ONCE per symbol per cycle here, and reused for every
+                    # enabled timeframe below. Per-tf candle closes are only used
+                    # for their own historical/ATR context (in _gann_open_trade),
+                    # never as "the current price" -- that's what caused 1m and
+                    # 30m to disagree on what "now" costs during a spike.
+                    master_px = await fetch_master_price(symbol)
+                    if master_px is None:
+                        continue
+                    detect_time = datetime.now(timezone.utc)
+
+                    cap_warned_this_cycle = False
+
+                    for tf in enabled_tfs:
+                        if any(isinstance(v, dict) and v.get('tf') == tf for v in sym_state['gann_open_trades'].values()) or tf in sym_state['gann_open_trades'].values():
+                            _diag_log_add({'ts': detect_time, 'symbol': symbol, 'tf': tf, 'master_px': master_px,
+                                           'skip_reason': 'already_open_on_this_tf'})
+                            continue 
+
+                        # ── Max concurrent trades cap (per symbol) ──
+                        # A single level touch used to be able to open one trade
+                        # PER enabled timeframe (e.g. 8 simultaneous BUYs off one
+                        # support touch). Cap the damage: once this symbol has
+                        # `prot_max_concurrent_trades` trades open, stop scanning
+                        # further timeframes for it THIS CYCLE. Already-open
+                        # trades are left alone; nothing is force-closed.
+                        max_concurrent = int(bot_state.get('prot_max_concurrent_trades', 4))
+                        open_count = sum(1 for v in sym_state['gann_open_trades'].values() if isinstance(v, dict))
+                        if open_count >= max_concurrent:
+                            if not cap_warned_this_cycle:
+                                await send_tg_msg(
+                                    f"⏸️ <b>[{symbol}]</b> تم بلوغ الحد الأقصى ({max_concurrent} صفقات مفتوحة) — "
+                                    f"تم تجاهل باقي الفريمات لهذه الدورة (الصفقات المفتوحة لم تُغلق)."
+                                )
+                                cap_warned_this_cycle = True
+                            _diag_log_add({'ts': detect_time, 'symbol': symbol, 'tf': tf, 'master_px': master_px,
+                                           'skip_reason': f'max_concurrent_cap_reached({open_count}>={max_concurrent})'})
                             break
+
+                        need = sym_state['gann_atr_period'] + 50
+                        candles = await fetch_candles(symbol, tf, count=need)
+                        if not candles or len(candles) < 3:
+                            # This used to be a fully SILENT skip -- no Telegram
+                            # message, nothing. It's exactly the kind of failure
+                            # that can make a whole batch of timeframes go quiet
+                            # with zero visibility. Now at least it's captured in
+                            # the diagnostic log for /export_diag_excel.
+                            _diag_log_add({'ts': detect_time, 'symbol': symbol, 'tf': tf, 'master_px': master_px,
+                                           'skip_reason': f'insufficient_oanda_candles(got={len(candles) if candles else 0})'})
+                            continue
+                        live_px = master_px  # unified real-time price, NOT candles[-1]['close']
+
+                        trend_up = True
+                        if sym_state['gann_entry_mode'] == 'touch_trend':
+                            if macro_trend_up is None:
+                                _diag_log_add({'ts': detect_time, 'symbol': symbol, 'tf': tf, 'master_px': master_px,
+                                               'skip_reason': 'trend_undetermined(insufficient_trend_tf_data)'})
+                                continue 
+                            trend_up = macro_trend_up
+
+                        # Nearest trend-compatible level + distance, logged every
+                        # cycle regardless of outcome -- this is what lets
+                        # /export_diag_excel answer "was there ever a real,
+                        # trend-compatible, in-margin opportunity we missed?"
+                        directional_levels = [l for l in levels if (l['dir'] == 'dn') == trend_up] if sym_state['gann_entry_mode'] == 'touch_trend' else levels
+                        nearest_dist = None; nearest_price = None
+                        for l in directional_levels:
+                            d = abs(live_px - l['price'])
+                            if nearest_dist is None or d < nearest_dist:
+                                nearest_dist = d; nearest_price = l['price']
+
+                        touch_attempted = False
+                        for lv in levels:
+                            k = lv['key']; dir = lv['dir']
+                            combo_key = f"{k}_{tf}" if bot_state['prot_allow_multi_tf'] else k
+                            status = sym_state['gann_level_status'].get(combo_key)
+                            if status == 'used': continue
+
+                            is_buy = (dir == 'dn')
+                        
+                            if sym_state['gann_entry_mode'] == 'touch_trend':
+                                if is_buy and not trend_up: continue
+                                if not is_buy and trend_up: continue
+
+                            if abs(live_px - lv['price']) <= margin:
+                                if flt_type == 'vwap': flt_label = f"VWAP={sym_state['trend_vwap_period']}\n"
+                                elif flt_type == 'ema': flt_label = f"EMA={sym_state['trend_ema_period']}\n"
+                                else: flt_label = f"VWAP+EMA"
                             
+                                reason = f"لمس دعم 🟢 (مع {flt_label}_{ttf.upper()})" if is_buy else f"لمس مقاومة 🔴 (مع {flt_label}_{ttf.upper()})\n"
+                                touch_attempted = True
+                                await _gann_open_trade(symbol, is_buy, lv, candles, reason=reason, tf=tf,
+                                                        initial_px=master_px, detect_time=detect_time)
+                                break
+
+                        _diag_log_add({'ts': detect_time, 'symbol': symbol, 'tf': tf, 'master_px': master_px,
+                                       'trend_up': trend_up, 'margin': margin,
+                                       'nearest_compatible_level': nearest_price, 'nearest_dist': nearest_dist,
+                                       'within_margin': (nearest_dist is not None and nearest_dist <= margin),
+                                       'touch_attempted': touch_attempted,
+                                       'skip_reason': None if touch_attempted else 'no_qualifying_touch_this_cycle'})
+                            
+                except Exception as sym_exc:
+                    log_exception(f"gann_monitor_scanner per-symbol [{symbol}]", sym_exc)
+                    now_mono_sym = time.monotonic()
+                    if now_mono_sym - _last_scanner_error_alert_ts > 300:
+                        _last_scanner_error_alert_ts = now_mono_sym
+                        await send_tg_msg(
+                            f"🛑 <b>[{symbol}]</b> خطأ غير متوقع أثناء فحص هذا الرمز -- تم تخطيه لهذه الدورة فقط "
+                            f"(باقي الرموز تستمر بشكل طبيعي):\n{sym_exc}"
+                        )
+                    continue
         except Exception as e:
             log_exception('gann_monitor_scanner main loop', e)
+            # This top-level catch wraps EVERY symbol's processing for the
+            # whole cycle -- an exception anywhere (even for just one
+            # symbol/timeframe) previously aborted the ENTIRE cycle
+            # completely silently (server-side log only, no Telegram
+            # message), which could look exactly like "the bot just isn't
+            # opening trades" with zero clue why. Surface it, rate-limited
+            # so a persistent failure doesn't spam every 15s.
+            now_mono = time.monotonic()
+            if now_mono - _last_scanner_error_alert_ts > 300:  # at most once per 5 min
+                _last_scanner_error_alert_ts = now_mono
+                await send_tg_msg(
+                    f"🛑 <b>خطأ غير متوقع بدورة الفحص الحية (gann_monitor_scanner):</b>\n{e}\n"
+                    f"تم تخطي بقية هذه الدورة بالكامل بسببه. سيُعاد المحاولة بالدورة القادمة (~15 ثانية). "
+                    f"إذا تكرر هذا الخطأ، راجع السجل الكامل (traceback) على السيرفر."
+                )
         await asyncio.sleep(15)
 
 # ─────────────────────────────────────────────────────────────
@@ -2441,6 +2602,17 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
                         sig_dam_time = (sig['time'] + timedelta(hours=3)).time()
                         if any(start <= sig_dam_time < end for start, end in _DAM_RESTRICTED_WINDOWS):
                             continue
+                    # Max concurrent trades cap -- mirrors the live bot's
+                    # prot_max_concurrent_trades. Without this, the backtest
+                    # can open one trade per enabled timeframe off a single
+                    # level touch with no limit (the exact multi-tf stacking
+                    # that caused real losses live), which is NOT what the
+                    # live bot actually does anymore, and inflates backtest
+                    # trade counts relative to what live can ever produce.
+                    max_concurrent_bt = int(bot_state.get('prot_max_concurrent_trades', 4))
+                    open_count_bt = sum(1 for tr in open_trades if tr['symbol'] == sig['symbol'])
+                    if open_count_bt >= max_concurrent_bt:
+                        continue
                     sig['sl_current'] = sig['sl_px']
                     sig['be_activated'] = False
                     open_trades.append(sig)
@@ -2684,6 +2856,15 @@ async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
                 log_exception('gann_run_diagnostics', e)
                 await send_tg_msg(f"❌ فشل التشخيص: {e}")
         asyncio.create_task(_run_diag_task())
+        return
+    if d == 'export_diag_excel':
+        async def _export_diag_task():
+            try:
+                await export_diag_log_excel()
+            except Exception as e:
+                log_exception('export_diag_log_excel', e)
+                await send_tg_msg(f"❌ فشل تصدير سجل التشخيص: {e}")
+        asyncio.create_task(_export_diag_task())
         return
     if d == 'manual_resume_step1':
         current_state = bot_state.get('connection_state', CONN_RUNNING)
