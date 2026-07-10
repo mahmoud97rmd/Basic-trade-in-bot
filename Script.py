@@ -2530,9 +2530,17 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
                             if sym_state['gann_entry_mode'] == 'touch_trend':
                                 if is_buy and not trend_up: continue
                                 if not is_buy and trend_up: continue
-                            if not (bar_low <= lv['price'] + margin and bar_high >= lv['price'] - margin): continue
-                            
-                            entry = lv['price']
+                            exec_mode = sym_state.get('gann_execution_mode', 'instant')
+                            if exec_mode == 'close':
+                                if abs(bar_close - lv['price']) > margin: continue
+                                entry = bar_close
+                            else:
+                                if not (bar_low <= lv['price'] + margin and bar_high >= lv['price'] - margin): continue
+                                if exec_mode == 'hybrid':
+                                    momentum = abs(bar_close - bar_open)
+                                    max_spike = bot_state.get('gann_spike_limit_pts', 20.0) * SYMBOL_INFO[symbol]['pip_value']
+                                    if momentum > max_spike: continue
+                                entry = lv['price']
                             be_trigger_px = None
                             if sym_state['break_even_enabled']:
                                 be_trigger_px = 'dynamic'
@@ -2968,6 +2976,15 @@ async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
                 await send_tg_msg(f"❌ فشل التشخيص: {e}")
         asyncio.create_task(_run_diag_task())
         return
+    if d == 'export_live_excel':
+        async def _export_live_task():
+            try:
+                await export_live_excel()
+            except Exception as e:
+                log_exception('export_live_excel', e)
+                await send_tg_msg(f"❌ فشل تصدير سجل الصفقات الحية: {e}")
+        asyncio.create_task(_export_live_task())
+        return
     if d == 'export_diag_excel':
         async def _export_diag_task():
             try:
@@ -2976,6 +2993,15 @@ async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
                 log_exception('export_diag_log_excel', e)
                 await send_tg_msg(f"❌ فشل تصدير سجل التشخيص: {e}")
         asyncio.create_task(_export_diag_task())
+        return
+    if d == 'export_live_excel':
+        async def _export_live_task():
+            try:
+                await export_live_excel()
+            except Exception as e:
+                log_exception('export_live_excel', e)
+                await send_tg_msg(f"❌ فشل تصدير سجل الصفقات الحية: {e}")
+        asyncio.create_task(_export_live_task())
         return
     if d == 'manual_resume_step1':
         current_state = bot_state.get('connection_state', CONN_RUNNING)
@@ -3150,6 +3176,14 @@ async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
         await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
     elif d == 'gann_toggle_entry':
         sym_state['gann_entry_mode'] = 'pure_touch' if sym_state['gann_entry_mode'] == 'touch_trend' else 'touch_trend'
+        await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
+    elif d == 'gann_toggle_exec_mode':
+        current = sym_state.get('gann_execution_mode', 'instant')
+        if current == 'instant': nxt = 'close'
+        elif current == 'close': nxt = 'hybrid'
+        else: nxt = 'instant'
+        sym_state['gann_execution_mode'] = nxt
+        await save_bot_persistence()
         await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
     elif d == 'gann_toggle_filter':
         current = sym_state['gann_zone_filter']
