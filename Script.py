@@ -1215,6 +1215,11 @@ def get_gann_keyboard() -> dict:
         
     ttf_lbl = sym_state['trend_timeframe'].upper()
     em_lbl  = f'⚡ لمس + فلتر ({flt_name}_{ttf_lbl})' if em == 'touch_trend' else '⚡ لمس أعمى (بدون فلتر)'
+    
+    exec_mode = sym_state.get('gann_execution_mode', 'instant')
+    if exec_mode == 'instant': exec_lbl = '⚡ دخول لمس مباشر (مخاطرة عالية)'
+    elif exec_mode == 'close': exec_lbl = '⏳ انتظار إغلاق الشمعة (أمان عالي)'
+    else: exec_lbl = '🛡️ مباشر هجين (فلتر سرعة عنيفة)'
     tps_lbl = f'🎯 TP/SL: {"نقاط ثابتة" if tpsm == "fixed" else "حسب ATR"}'
 
     tp = sym_state['gann_tp_points']; sl = sym_state['gann_sl_points']
@@ -1254,6 +1259,7 @@ def get_gann_keyboard() -> dict:
     rows += [
         [{'text': '── الاستراتيجية والفلتر ──', 'callback_data': 'noop'}],
         [{'text': f'الاستراتيجية: {em_lbl}', 'callback_data': 'gann_toggle_entry'}],
+        [{'text': f'نوع التنفيذ: {exec_lbl}', 'callback_data': 'gann_toggle_exec_mode'}],
         [{'text': f'فلتر الدخول: {zf_lbl}', 'callback_data': 'gann_toggle_filter'}],
         [{'text': filt_btn_lbl, 'callback_data': 'gann_toggle_filter_type'}],
         [{'text': f'⏱️ فريم الترند: {ttf_lbl}', 'callback_data': 'gann_toggle_ttf'}],
@@ -2163,9 +2169,24 @@ async def gann_monitor_scanner() -> None:
                             k = lv['key']; dir = lv['dir']
                             is_buy = (dir == 'dn')
                             
-                            dist = abs(live_px - lv['price'])
+                            exec_mode = sym_state.get('gann_execution_mode', 'instant')
+                            
+                            if exec_mode == 'close':
+                                check_px = float(candles[-1]['close'])
+                            else:
+                                check_px = live_px
+                                
+                            dist = abs(check_px - lv['price'])
                             if dist > margin:
                                 continue
+                                
+                            if exec_mode == 'hybrid':
+                                last_close = float(candles[-1]['close'])
+                                momentum = abs(live_px - last_close)
+                                max_spike = bot_state.get('gann_spike_limit_pts', 20.0) * SYMBOL_INFO[symbol]['pip_value']
+                                if momentum > max_spike:
+                                    level_rejections.append({'level': lv['price'], 'reason': f'hybrid_spike_rejected({momentum:.2f}>{max_spike:.2f})'})
+                                    continue
                                 
                             combo_key = f"{k}_{tf}" if bot_state['prot_allow_multi_tf'] else k
                             status = sym_state['gann_level_status'].get(combo_key)
