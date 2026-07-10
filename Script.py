@@ -2078,43 +2078,55 @@ async def gann_monitor_scanner() -> None:
                         # cycle regardless of outcome -- this is what lets
                         # /export_diag_excel answer "was there ever a real,
                         # trend-compatible, in-margin opportunity we missed?"
-                        directional_levels = [l for l in levels if (l['dir'] == 'dn') == trend_up] if sym_state['gann_entry_mode'] == 'touch_trend' else levels
-                        nearest_dist = None; nearest_price = None
-                        for l in directional_levels:
-                            d = abs(live_px - l['price'])
-                            if nearest_dist is None or d < nearest_dist:
-                                nearest_dist = d; nearest_price = l['price']
-
+                        level_rejections = []
                         touch_attempted = False
+                        
                         for lv in levels:
                             k = lv['key']; dir = lv['dir']
+                            is_buy = (dir == 'dn')
+                            
+                            dist = abs(live_px - lv['price'])
+                            if dist > margin:
+                                continue
+                                
                             combo_key = f"{k}_{tf}" if bot_state['prot_allow_multi_tf'] else k
                             status = sym_state['gann_level_status'].get(combo_key)
-                            if status == 'used': continue
-
-                            is_buy = (dir == 'dn')
-                        
-                            if sym_state['gann_entry_mode'] == 'touch_trend':
-                                if is_buy and not trend_up: continue
-                                if not is_buy and trend_up: continue
-
-                            if abs(live_px - lv['price']) <= margin:
-                                if flt_type == 'vwap': flt_label = f"VWAP={sym_state['trend_vwap_period']}\n"
-                                elif flt_type == 'ema': flt_label = f"EMA={sym_state['trend_ema_period']}\n"
-                                else: flt_label = f"VWAP+EMA"
                             
-                                reason = f"لمس دعم 🟢 (مع {flt_label}_{ttf.upper()})" if is_buy else f"لمس مقاومة 🔴 (مع {flt_label}_{ttf.upper()})\n"
-                                touch_attempted = True
-                                await _gann_open_trade(symbol, is_buy, lv, candles, reason=reason, tf=tf,
-                                                        initial_px=master_px, detect_time=detect_time)
-                                break
+                            if status == 'used':
+                                level_rejections.append({'level': lv['price'], 'reason': 'level_already_used'})
+                                continue
+                                
+                            if sym_state['gann_entry_mode'] == 'touch_trend':
+                                if is_buy and not trend_up:
+                                    level_rejections.append({'level': lv['price'], 'reason': 'against_trend'})
+                                    continue
+                                if not is_buy and trend_up:
+                                    level_rejections.append({'level': lv['price'], 'reason': 'against_trend'})
+                                    continue
 
-                        _diag_log_add({'ts': detect_time, 'symbol': symbol, 'tf': tf, 'master_px': master_px,
-                                       'trend_up': trend_up, 'margin': margin,
-                                       'nearest_compatible_level': nearest_price, 'nearest_dist': nearest_dist,
-                                       'within_margin': (nearest_dist is not None and nearest_dist <= margin),
-                                       'touch_attempted': touch_attempted,
-                                       'skip_reason': None if touch_attempted else 'no_qualifying_touch_this_cycle'})
+                            if flt_type == 'vwap': flt_label = f"VWAP={sym_state['trend_vwap_period']}\n"
+                            elif flt_type == 'ema': flt_label = f"EMA={sym_state['trend_ema_period']}\n"
+                            else: flt_label = f"VWAP+EMA"
+                        
+                            reason = f"لمس دعم 🟢 (مع {flt_label}_{ttf.upper()})" if is_buy else f"لمس مقاومة 🔴 (مع {flt_label}_{ttf.upper()})\n"
+                            touch_attempted = True
+                            
+                            _diag_log_add({'ts': detect_time, 'symbol': symbol, 'tf': tf, 'master_px': master_px,
+                                           'trend_up': trend_up, 'margin': margin,
+                                           'level': lv['price'],
+                                           'action': 'dispatching_trade'})
+                                           
+                            await _gann_open_trade(symbol, is_buy, lv, candles, reason=reason, tf=tf,
+                                                    initial_px=master_px, detect_time=detect_time)
+                            break
+                        
+                        if not touch_attempted:
+                            skip_r = 'no_level_within_margin'
+                            if level_rejections:
+                                skip_r = f"rejected_levels: {level_rejections}"
+                            _diag_log_add({'ts': detect_time, 'symbol': symbol, 'tf': tf, 'master_px': master_px,
+                                           'trend_up': trend_up, 'margin': margin,
+                                           'skip_reason': skip_r})
                             
                 except Exception as sym_exc:
                     log_exception(f"gann_monitor_scanner per-symbol [{symbol}]", sym_exc)
@@ -2140,10 +2152,10 @@ async def gann_monitor_scanner() -> None:
                 _last_scanner_error_alert_ts = now_mono
                 await send_tg_msg(
                     f"🛑 <b>خطأ غير متوقع بدورة الفحص الحية (gann_monitor_scanner):</b>\n{e}\n"
-                    f"تم تخطي بقية هذه الدورة بالكامل بسببه. سيُعاد المحاولة بالدورة القادمة (~15 ثانية). "
+                    f"تم تخطي بقية هذه الدورة بالكامل بسببه. سيُعاد المحاولة بالدورة القادمة (~3 ثانية). "
                     f"إذا تكرر هذا الخطأ، راجع السجل الكامل (traceback) على السيرفر."
                 )
-        await asyncio.sleep(15)
+        await asyncio.sleep(3)
 
 # ─────────────────────────────────────────────────────────────
 # PRO BACKTEST ENGINE (Macro Trend & Smart Break-Even)
