@@ -2505,7 +2505,7 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
 
                     for bar in m_window:
                         bar_close = float(bar['close']); bar_time = bar['time']
-                        bar_low = float(bar['low']); bar_high = float(bar['high'])
+                        bar_low = float(bar['low']); bar_high = float(bar['high']); bar_open = float(bar['open'])
                         trend_up = True
                         if sym_state['gann_entry_mode'] == 'touch_trend':
                             trend_time = bar_time.floor(trend_freq)
