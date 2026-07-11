@@ -2732,18 +2732,7 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime, is_pessimistic
                         sig_dam_time = (sig['time'] + timedelta(hours=3)).time()
                         if any(start <= sig_dam_time < end for start, end in _DAM_RESTRICTED_WINDOWS):
                             continue
-                    # Max concurrent trades cap -- mirrors the live bot's
-                    # prot_max_concurrent_trades. Without this, the backtest
-                    # can open one trade per enabled timeframe off a single
-                    # level touch with no limit (the exact multi-tf stacking
-                    # that caused real losses live), which is NOT what the
-                    # live bot actually does anymore, and inflates backtest
-                    # trade counts relative to what live can ever produce.
                     if is_pessimistic:
-                        max_concurrent_bt = int(bot_state.get('prot_max_concurrent_trades', 4))
-                        open_count_bt = sum(1 for tr in open_trades if tr['symbol'] == sig['symbol'])
-                        if open_count_bt >= max_concurrent_bt:
-                            continue
                         cooldown = level_cooldown_memory.get((sig['symbol'], sig['level_key']))
                         if cooldown and sig['time'] < cooldown:
                             continue
