@@ -1155,6 +1155,7 @@ def get_main_keyboard() -> dict:
         [{'text': '🛡️ إعدادات الحماية', 'callback_data': 'menu_protection'}],
         [{'text': '💾 إدارة الإعدادات (Presets)', 'callback_data': 'menu_presets'}],
         [{'text': '📊 بدء الباكتيست', 'callback_data': 'menu_gann_bt'}],
+        [{'text': '📊 الباكتيست الواقعي (التشاؤمي)', 'callback_data': 'menu_gann_bt_pessimistic'}],
     ]}
 
 
@@ -1318,6 +1319,7 @@ def get_gann_keyboard() -> dict:
     rows += [
         [{'text': '⚙️ TP/SL مخصص لكل فريم', 'callback_data': 'gann_tpsl_tf'}],
         [{'text': '📊 بدء الباكتيست', 'callback_data': 'menu_gann_bt'}],
+        [{'text': '📊 الباكتيست الواقعي (التشاؤمي)', 'callback_data': 'menu_gann_bt_pessimistic'}],
         [{'text': '← رجوع', 'callback_data': 'menu_main'}],
     ]
     return {'inline_keyboard': rows}
@@ -2374,10 +2376,11 @@ async def global_ledger_reconciliation() -> None:
         except Exception as e:
             log_exception('global_ledger_reconciliation main loop', e)
 
-async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
+async def run_gann_backtest(start_dt: datetime, end_dt: datetime, is_pessimistic: bool = False) -> None:
     global _bt_progress
     bot_state['is_backtesting'] = True
-    fname = f"GannBT_{datetime.now(timezone.utc).strftime('%H%M%S')}.xlsx"
+    p_suffix = '_Pessimistic' if is_pessimistic else ''
+    fname = f"GannBT{p_suffix}_{datetime.now(timezone.utc).strftime('%H%M%S')}.xlsx" 
     
     active_symbols = [s for s, on in bot_state['active_symbols'].items() if on]
     if not active_symbols:
@@ -2541,6 +2544,11 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
                                     max_spike = bot_state.get('gann_spike_limit_pts', 20.0) * SYMBOL_INFO[symbol]['pip_value']
                                     if momentum > max_spike: continue
                                 entry = lv['price']
+                            if is_pessimistic:
+                                spread = bot_state.get('pessimistic_spread_pts', 30) * pv
+                                # Strict Entry Price Fix: use bar_close as the delayed execution price
+                                entry = bar_close + spread if is_buy else bar_close - spread
+
                             be_trigger_px = None
                             if sym_state['break_even_enabled']:
                                 be_trigger_px = 'dynamic'
@@ -2571,6 +2579,7 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
         all_candles_events.sort(key=lambda x: x['time'])
         
         open_trades = []
+        level_cooldown_memory = {}
         closed_trades = []
         suspended_days = {}
         suspend_trigger_time = {}
@@ -2678,26 +2687,28 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
                             tr['be_activated'] = True
 
                     # Outcome check uses h/l for extreme boundary testing
-                    if is_buy:
-                        if l <= sl_current:
-                            tr['outcome'] = 'BREAK_EVEN' if sl_current > entry - 0.01 else 'LOSS'
-                            tr['p_usd'] = round(abs(sl_current - entry) * lot * cs * quote_conv, 2) if tr['outcome'] == 'BREAK_EVEN' else -round(sl_d * lot * cs * quote_conv, 2)
-                            closed = True
-                        elif not closed and h >= tp_px:
-                            tr['outcome'] = 'WIN'
-                            tr['p_usd'] = round(tr['tp_d'] * lot * cs * quote_conv, 2)
-                            closed = True
+                    tp_hit = (h >= tp_px) if is_buy else (l <= tp_px)
+                    sl_hit = (l <= sl_current) if is_buy else (h >= sl_current)
+                    
+                    if is_pessimistic and tp_hit and sl_hit:
+                        tr['outcome'] = 'BREAK_EVEN' if ((sl_current > entry - 0.01) if is_buy else (sl_current < entry + 0.01)) else 'LOSS'
+                        tr['p_usd'] = round(abs(entry - sl_current) * lot * cs * quote_conv, 2) if tr['outcome'] == 'BREAK_EVEN' else -round(sl_d * lot * cs * quote_conv, 2)
+                        closed = True
                     else:
-                        if h >= sl_current:
-                            tr['outcome'] = 'BREAK_EVEN' if sl_current < entry + 0.01 else 'LOSS'
+                        if sl_hit:
+                            tr['outcome'] = 'BREAK_EVEN' if ((sl_current > entry - 0.01) if is_buy else (sl_current < entry + 0.01)) else 'LOSS'
                             tr['p_usd'] = round(abs(entry - sl_current) * lot * cs * quote_conv, 2) if tr['outcome'] == 'BREAK_EVEN' else -round(sl_d * lot * cs * quote_conv, 2)
                             closed = True
-                        elif not closed and l <= tp_px:
+                        elif tp_hit:
                             tr['outcome'] = 'WIN'
                             tr['p_usd'] = round(tr['tp_d'] * lot * cs * quote_conv, 2)
                             closed = True
                             
                     if closed:
+                        if is_pessimistic:
+                            comm_usd = float(bot_state.get('pessimistic_commission_usd', 3.0))
+                            tr['p_usd'] -= comm_usd
+                            level_cooldown_memory[(sym, tr['level_key'])] = t + __import__('datetime').timedelta(minutes=60)
                         tr['close_time'] = t
                         daily_pl += tr['p_usd']
                         closed_trades.append(tr)
@@ -2728,10 +2739,14 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
                     # that caused real losses live), which is NOT what the
                     # live bot actually does anymore, and inflates backtest
                     # trade counts relative to what live can ever produce.
-                    max_concurrent_bt = int(bot_state.get('prot_max_concurrent_trades', 4))
-                    open_count_bt = sum(1 for tr in open_trades if tr['symbol'] == sig['symbol'])
-                    if open_count_bt >= max_concurrent_bt:
-                        continue
+                    if is_pessimistic:
+                        max_concurrent_bt = int(bot_state.get('prot_max_concurrent_trades', 4))
+                        open_count_bt = sum(1 for tr in open_trades if tr['symbol'] == sig['symbol'])
+                        if open_count_bt >= max_concurrent_bt:
+                            continue
+                        cooldown = level_cooldown_memory.get((sig['symbol'], sig['level_key']))
+                        if cooldown and sig['time'] < cooldown:
+                            continue
                     sig['sl_current'] = sig['sl_px']
                     sig['be_activated'] = False
                     open_trades.append(sig)
@@ -2788,9 +2803,12 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
         
         c_log('BT: Generating Excel')
         
+        pess_lbl = ' (واقعي/تشاؤمي)' if is_pessimistic else ' (مثالي)'
         sum_text = (
-            f"<b>باكتيست جان اكتمل ✅</b>\n"
-            f"{syms_label} H1→[{desc_tfs}] | {desc_mode} | {desc_star}{desc_be}\n"
+            f"<b>باكتيست جان{pess_lbl} اكتمل ✅</b>
+"
+            f"{syms_label} H1→[{desc_tfs}] | {desc_mode} | {desc_star}{desc_be}
+" 
             f"{start_dt.strftime('%Y-%m-%d')} → {end_dt.strftime('%Y-%m-%d')}\n\n"
             f"Net: {'PROFIT ▲' if res['total_prof']>=0 else 'LOSS ▼'} ${round(res['total_prof'], 2)}\n"
             f"Win:  +${round(res['total_win_usd'], 2)} ({res['win']})\n"
@@ -3291,13 +3309,18 @@ async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
     elif d.startswith('gann_tptf_rst_'):
         tf = d[len('gann_tptf_rst_'):]; sym_state['gann_tp_per_tf'][tf] = 0; sym_state['gann_sl_per_tf'][tf] = 0; await _show(chat_id, msg_id, f'⚙️ تمت إعادة الضبط:', get_gann_tpsl_tf_keyboard(tf))
     elif d == 'menu_gann_bt':
-        await _show(chat_id, msg_id, 'اختر مدة الباكتيست:', get_gann_bt_keyboard())
+        bot_state['bt_is_pessimistic'] = False
+        await _show(chat_id, msg_id, 'اختر مدة الباكتيست (مثالي):', get_gann_bt_keyboard())
+    elif d == 'menu_gann_bt_pessimistic':
+        bot_state['bt_is_pessimistic'] = True
+        await _show(chat_id, msg_id, 'اختر مدة الباكتيست (الواقعي/التشاؤمي):', get_gann_bt_keyboard())
     elif d.startswith('gbt_'):
         days = int(d.split('_')[1])
         end_dt = datetime.now(timezone.utc)
         start_dt = end_dt - timedelta(days=days)
-        if not bot_state['is_backtesting']: asyncio.create_task(run_gann_backtest(start_dt, end_dt))
-        await _show(chat_id, msg_id, f'⏳ باكتيست يعمل...', get_gann_bt_keyboard())
+        is_pess = bot_state.get('bt_is_pessimistic', False)
+        if not bot_state['is_backtesting']: asyncio.create_task(run_gann_backtest(start_dt, end_dt, is_pessimistic=is_pess))
+        await _show(chat_id, msg_id, f'⏳ باكتيست {"تشاؤمي " if is_pess else ""}يعمل...', get_gann_bt_keyboard())
     elif d == 'cancel_bt':
         global _bt_progress
         if _bt_progress and bot_state['is_backtesting']: await _bt_progress.cancel()
