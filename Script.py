@@ -2805,10 +2805,8 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime, is_pessimistic
         
         pess_lbl = ' (واقعي/تشاؤمي)' if is_pessimistic else ' (مثالي)'
         sum_text = (
-            f"<b>باكتيست جان{pess_lbl} اكتمل ✅</b>
-"
-            f"{syms_label} H1→[{desc_tfs}] | {desc_mode} | {desc_star}{desc_be}
-" 
+            f"<b>باكتيست جان{pess_lbl} اكتمل ✅</b>\\n"
+            f"{syms_label} H1→[{desc_tfs}] | {desc_mode} | {desc_star}{desc_be}\\n" 
             f"{start_dt.strftime('%Y-%m-%d')} → {end_dt.strftime('%Y-%m-%d')}\n\n"
             f"Net: {'PROFIT ▲' if res['total_prof']>=0 else 'LOSS ▼'} ${round(res['total_prof'], 2)}\n"
             f"Win:  +${round(res['total_win_usd'], 2)} ({res['win']})\n"

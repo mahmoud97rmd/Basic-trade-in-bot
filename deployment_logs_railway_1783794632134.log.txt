@@ -1,0 +1,56 @@
+2026-07-11T18:14:20.604401149Z [info] Mounting volume on: /var/lib/containers/railwayapp/bind-mounts/e7d68f09-01e3-43db-8cb5-33aac9b22b64/vol_wvye3hgg4jhs73s9
+2026-07-11T18:14:20.604419987Z [info] Starting Container
+2026-07-11T18:14:20.621438833Z [error]     ^
+2026-07-11T18:14:20.621448142Z [error] SyntaxError: unterminated f-string literal (detected at line 2808)
+2026-07-11T18:14:20.621586321Z [error]   File "/app/Script.py", line 2808
+2026-07-11T18:14:20.621592131Z [error]     f"<b>باكتيست جان{pess_lbl} اكتمل ✅</b>
+2026-07-11T18:14:21.649833836Z [info] Mounting volume on: /var/lib/containers/railwayapp/bind-mounts/e7d68f09-01e3-43db-8cb5-33aac9b22b64/vol_wvye3hgg4jhs73s9
+2026-07-11T18:14:21.836563907Z [error]   File "/app/Script.py", line 2808
+2026-07-11T18:14:21.836571306Z [error]     f"<b>باكتيست جان{pess_lbl} اكتمل ✅</b>
+2026-07-11T18:14:21.836575956Z [error]     ^
+2026-07-11T18:14:21.836580406Z [error] SyntaxError: unterminated f-string literal (detected at line 2808)
+2026-07-11T18:14:22.663708676Z [info] Mounting volume on: /var/lib/containers/railwayapp/bind-mounts/e7d68f09-01e3-43db-8cb5-33aac9b22b64/vol_wvye3hgg4jhs73s9
+2026-07-11T18:14:22.917652866Z [error]   File "/app/Script.py", line 2808
+2026-07-11T18:14:22.917663475Z [error]     f"<b>باكتيست جان{pess_lbl} اكتمل ✅</b>
+2026-07-11T18:14:22.917667045Z [error]     ^
+2026-07-11T18:14:22.917671195Z [error] SyntaxError: unterminated f-string literal (detected at line 2808)
+2026-07-11T18:14:24.312194254Z [error]   File "/app/Script.py", line 2808
+2026-07-11T18:14:24.312198894Z [error]     f"<b>باكتيست جان{pess_lbl} اكتمل ✅</b>
+2026-07-11T18:14:24.312202594Z [error]     ^
+2026-07-11T18:14:24.312205854Z [error] SyntaxError: unterminated f-string literal (detected at line 2808)
+2026-07-11T18:14:24.705200350Z [info] Mounting volume on: /var/lib/containers/railwayapp/bind-mounts/e7d68f09-01e3-43db-8cb5-33aac9b22b64/vol_wvye3hgg4jhs73s9
+2026-07-11T18:14:25.279412190Z [error]   File "/app/Script.py", line 2808
+2026-07-11T18:14:25.279417289Z [error]     f"<b>باكتيست جان{pess_lbl} اكتمل ✅</b>
+2026-07-11T18:14:25.279421469Z [error]     ^
+2026-07-11T18:14:25.279424839Z [error] SyntaxError: unterminated f-string literal (detected at line 2808)
+2026-07-11T18:14:25.708896822Z [info] Mounting volume on: /var/lib/containers/railwayapp/bind-mounts/e7d68f09-01e3-43db-8cb5-33aac9b22b64/vol_wvye3hgg4jhs73s9
+2026-07-11T18:14:26.331232351Z [error]   File "/app/Script.py", line 2808
+2026-07-11T18:14:26.331236081Z [error]     f"<b>باكتيست جان{pess_lbl} اكتمل ✅</b>
+2026-07-11T18:14:26.331242051Z [error]     ^
+2026-07-11T18:14:26.331245951Z [error] SyntaxError: unterminated f-string literal (detected at line 2808)
+2026-07-11T18:14:26.748335849Z [info] Mounting volume on: /var/lib/containers/railwayapp/bind-mounts/e7d68f09-01e3-43db-8cb5-33aac9b22b64/vol_wvye3hgg4jhs73s9
+2026-07-11T18:14:27.619379820Z [error]   File "/app/Script.py", line 2808
+2026-07-11T18:14:27.619383699Z [error]     f"<b>باكتيست جان{pess_lbl} اكتمل ✅</b>
+2026-07-11T18:14:27.619388019Z [error]     ^
+2026-07-11T18:14:27.619391369Z [error] SyntaxError: unterminated f-string literal (detected at line 2808)
+2026-07-11T18:14:27.751580113Z [info] Mounting volume on: /var/lib/containers/railwayapp/bind-mounts/e7d68f09-01e3-43db-8cb5-33aac9b22b64/vol_wvye3hgg4jhs73s9
+2026-07-11T18:14:28.599829003Z [error]   File "/app/Script.py", line 2808
+2026-07-11T18:14:28.599832982Z [error]     f"<b>باكتيست جان{pess_lbl} اكتمل ✅</b>
+2026-07-11T18:14:28.599836602Z [error]     ^
+2026-07-11T18:14:28.599840582Z [error] SyntaxError: unterminated f-string literal (detected at line 2808)
+2026-07-11T18:14:28.756562785Z [info] Mounting volume on: /var/lib/containers/railwayapp/bind-mounts/e7d68f09-01e3-43db-8cb5-33aac9b22b64/vol_wvye3hgg4jhs73s9
+2026-07-11T18:14:29.757636263Z [info] Mounting volume on: /var/lib/containers/railwayapp/bind-mounts/e7d68f09-01e3-43db-8cb5-33aac9b22b64/vol_wvye3hgg4jhs73s9
+2026-07-11T18:14:29.877678397Z [error]   File "/app/Script.py", line 2808
+2026-07-11T18:14:29.877681527Z [error]     f"<b>باكتيست جان{pess_lbl} اكتمل ✅</b>
+2026-07-11T18:14:29.877685687Z [error]     ^
+2026-07-11T18:14:29.877689517Z [error] SyntaxError: unterminated f-string literal (detected at line 2808)
+2026-07-11T18:14:31.272742474Z [error]   File "/app/Script.py", line 2808
+2026-07-11T18:14:31.272746364Z [error]     f"<b>باكتيست جان{pess_lbl} اكتمل ✅</b>
+2026-07-11T18:14:31.272751644Z [error]     ^
+2026-07-11T18:14:31.272755314Z [error] SyntaxError: unterminated f-string literal (detected at line 2808)
+2026-07-11T18:14:31.759874196Z [info] Mounting volume on: /var/lib/containers/railwayapp/bind-mounts/e7d68f09-01e3-43db-8cb5-33aac9b22b64/vol_wvye3hgg4jhs73s9
+2026-07-11T18:14:32.323974582Z [error]   File "/app/Script.py", line 2808
+2026-07-11T18:14:32.323980192Z [error]     f"<b>باكتيست جان{pess_lbl} اكتمل ✅</b>
+2026-07-11T18:14:32.323984502Z [error]     ^
+2026-07-11T18:14:32.323987782Z [error] SyntaxError: unterminated f-string literal (detected at line 2808)
+2026-07-11T18:14:32.826173964Z [info] Mounting volume on: /var/lib/containers/railwayapp/bind-mounts/e7d68f09-01e3-43db-8cb5-33aac9b22b64/vol_wvye3hgg4jhs73s9
