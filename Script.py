@@ -364,6 +364,13 @@ bot_state: dict = {
     'is_live_twin_running': False,
     'timeframes':       _TFS,
 
+    # ── Live execution mode (Instant / Close / Hybrid) ──
+    # Default 'instant' == the scanner's existing, unchanged behavior
+    # (check live_px against the level margin and fire immediately).
+    # Nothing about current live trading changes until this is toggled.
+    'gann_execution_mode': 'instant',
+    'gann_spike_limit_pts': 20,   # hybrid mode: block entry if live_px has moved this many points past the last closed candle's close
+
     # ── Live-Twin Engine (realistic execution simulator) ──
     # Baseline spread taken from a live MT5/OANDA tick snapshot on
     # 2026-07-13 during the late-night (low-liquidity) session:
@@ -886,7 +893,7 @@ def _resolve_broker_symbol(symbol: str) -> str:
     return configured
 
 async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list, reason: str, tf: str,
-                            initial_px: float = None, detect_time: datetime = None) -> None:
+                            initial_px: float = None, detect_time: datetime = None, t1_signal_ts: float = None) -> None:
     global _consecutive_real_order_failures
     sym_state = bot_state['symbol_state'][symbol]
 
@@ -993,6 +1000,7 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
                 is_real = False
                 execution_failed = True
             else:
+                t2_pre_send_ts = None
                 try:
                     broker_symbol = _resolve_broker_symbol(symbol)
 
@@ -1011,6 +1019,8 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
                         'fillingModes': ['ORDER_FILLING_FOK'],
                     }
 
+                    # ── Latency telemetry (T1 signal -> T2 pre-send -> T3 broker ack) ──
+                    t2_pre_send_ts = time.monotonic()
                     if is_buy:
                         res = await _metaapi_conn.create_market_buy_order(
                             broker_symbol, lot, stop_loss=sl, take_profit=tp, options=order_options
@@ -1019,6 +1029,15 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
                         res = await _metaapi_conn.create_market_sell_order(
                             broker_symbol, lot, stop_loss=sl, take_profit=tp, options=order_options
                         )
+                    t3_ack_ts = time.monotonic()
+
+                    code_delay_ms = round((t2_pre_send_ts - t1_signal_ts) * 1000) if t1_signal_ts else None
+                    ping_ms = round((t3_ack_ts - t2_pre_send_ts) * 1000)
+                    telemetry_lbl = (
+                        f"\n⏱ Code Delay (T2-T1): {code_delay_ms}ms | MetaApi Ping (T3-T2): {ping_ms}ms"
+                        if code_delay_ms is not None else
+                        f"\n⏱ MetaApi Ping (T3-T2): {ping_ms}ms (T1 unavailable)"
+                    )
 
                     # CRITICAL: history deals/reconciliation are keyed by
                     # positionId, NOT orderId (they're different tickets in
@@ -1030,20 +1049,31 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
                     # PnL every time, and mislabeled it as the real MT5 profit.
                     # positionId must be preferred here.
                     trade_id = str(res.get('positionId', res.get('orderId', trade_id)))
-                    real_msg = "\n🚀 <b>تم فتح الصفقة حقيقياً على حسابك!</b>"
+                    real_msg = "\n🚀 <b>تم فتح الصفقة حقيقياً على حسابك!</b>" + telemetry_lbl
                     _consecutive_real_order_failures = 0
                 except Exception as ex:
                     log_exception(f"_gann_open_trade real order [{symbol} {tf}]", ex)
                     err_str = str(ex)
+                    t_fail_ts = time.monotonic()
+                    ref_t2 = t2_pre_send_ts if t2_pre_send_ts is not None else t_fail_ts
+                    code_delay_ms = round((ref_t2 - t1_signal_ts) * 1000) if t1_signal_ts else None
+                    fail_after_ms = round((t_fail_ts - ref_t2) * 1000)
+                    fail_telemetry_lbl = (
+                        f"\n⏱ Code Delay (T2-T1): {code_delay_ms}ms | Failed after send: {fail_after_ms}ms"
+                        if code_delay_ms is not None else
+                        f"\n⏱ Failed after send: {fail_after_ms}ms (T1 unavailable)"
+                    )
                     # Give an explicit signal when the rejection was caused by
                     # the deviation guard itself (requote / price moved beyond
                     # our slippage tolerance), rather than a generic failure,
                     # so it's obvious this is protective behavior, not a bug.
                     if any(code in err_str for code in ('REQUOTE', 'PRICE_CHANGED', 'OFF_QUOTES')):
                         real_msg = (f"\n🛑 <b>تم رفض الصفقة لتجاوز حد الانزلاق السعري "
-                                    f"({max_slippage_points} نقاط):</b> {ex}\nلم يتم التنفيذ لحمايتك من دخول سيء.")
+                                    f"({max_slippage_points} نقاط):</b> {ex}\nلم يتم التنفيذ لحمايتك من دخول سيء."
+                                    f"{fail_telemetry_lbl}")
                     else:
-                        real_msg = f"\n❌ <b>فشل فتح الصفقة حقيقياً:</b> {ex}\nلم يتم تتبعها كصفقة وهمية (لا يوجد تنفيذ فعلي)."
+                        real_msg = (f"\n❌ <b>فشل فتح الصفقة حقيقياً:</b> {ex}\nلم يتم تتبعها كصفقة وهمية "
+                                    f"(لا يوجد تنفيذ فعلي).{fail_telemetry_lbl}")
                     is_real = False
                     execution_failed = True
                     _consecutive_real_order_failures += 1
@@ -1270,9 +1300,17 @@ def get_gann_keyboard() -> dict:
             sel_row = []
     if sel_row: rows.append(sel_row)
     
+    exec_mode = bot_state.get('gann_execution_mode', 'instant')
+    exec_lbl = {
+        'instant': '⚡ دخول لمس مباشر (Instant)',
+        'close':   '⏳ انتظار إغلاق الشمعة (Close)',
+        'hybrid':  '🛡️ مباشر هجين (Hybrid Spike-Limit)',
+    }.get(exec_mode, '⚡ دخول لمس مباشر (Instant)')
+
     rows += [
         [{'text': '── الاستراتيجية والفلتر ──', 'callback_data': 'noop'}],
         [{'text': f'الاستراتيجية: {em_lbl}', 'callback_data': 'gann_toggle_entry'}],
+        [{'text': f'وضع التنفيذ: {exec_lbl}', 'callback_data': 'gann_toggle_exec_mode'}],
         [{'text': f'فلتر الدخول: {zf_lbl}', 'callback_data': 'gann_toggle_filter'}],
         [{'text': filt_btn_lbl, 'callback_data': 'gann_toggle_filter_type'}],
         [{'text': f'⏱️ فريم الترند: {ttf_lbl}', 'callback_data': 'gann_toggle_ttf'}],
@@ -2109,6 +2147,7 @@ async def gann_monitor_scanner() -> None:
                             if nearest_dist is None or d < nearest_dist:
                                 nearest_dist = d; nearest_price = l['price']
 
+                        exec_mode = bot_state.get('gann_execution_mode', 'instant')
                         touch_attempted = False
                         for lv in levels:
                             k = lv['key']; dir = lv['dir']
@@ -2123,14 +2162,44 @@ async def gann_monitor_scanner() -> None:
                                 if not is_buy and trend_up: continue
 
                             if abs(live_px - lv['price']) <= margin:
+                                # ── Execution mode gate ──
+                                # instant (default, unchanged behavior): fire now on live_px touch.
+                                # close: only fire if this tf's last CLOSED candle is itself within
+                                #        margin -- waits out the current candle instead of chasing
+                                #        a live tick that might reverse before it closes.
+                                # hybrid: fire on live_px touch like instant, but block if live_px
+                                #         has already run away from the last closed candle's close
+                                #         by more than the spike limit (chasing-a-spike protection).
+                                # A gated attempt does NOT mark the level 'used' -- it's simply
+                                # re-checked next cycle, same as if no touch had happened at all.
+                                gate_ok = True; gate_reason = None
+                                if exec_mode == 'close':
+                                    closed_close = float(candles[-1]['close'])
+                                    if abs(closed_close - lv['price']) > margin:
+                                        gate_ok = False
+                                        gate_reason = f'close_mode_wait(closed_close={closed_close:.2f} outside margin of level {lv["price"]:.2f})'
+                                elif exec_mode == 'hybrid':
+                                    prev_close = float(candles[-1]['close'])
+                                    spike_limit = bot_state.get('gann_spike_limit_pts', 20) * SYMBOL_INFO[symbol]['pip_value']
+                                    momentum = abs(live_px - prev_close)
+                                    if momentum > spike_limit:
+                                        gate_ok = False
+                                        gate_reason = f'hybrid_spike_blocked(momentum={momentum:.3f} > limit={spike_limit:.3f})'
+
+                                if not gate_ok:
+                                    _diag_log_add({'ts': detect_time, 'symbol': symbol, 'tf': tf, 'master_px': master_px,
+                                                   'skip_reason': gate_reason})
+                                    continue
+
                                 if flt_type == 'vwap': flt_label = f"VWAP={sym_state['trend_vwap_period']}\n"
                                 elif flt_type == 'ema': flt_label = f"EMA={sym_state['trend_ema_period']}\n"
                                 else: flt_label = f"VWAP+EMA"
                             
                                 reason = f"لمس دعم 🟢 (مع {flt_label}_{ttf.upper()})" if is_buy else f"لمس مقاومة 🔴 (مع {flt_label}_{ttf.upper()})\n"
                                 touch_attempted = True
+                                t1_signal_ts = time.monotonic()
                                 await _gann_open_trade(symbol, is_buy, lv, candles, reason=reason, tf=tf,
-                                                        initial_px=master_px, detect_time=detect_time)
+                                                        initial_px=master_px, detect_time=detect_time, t1_signal_ts=t1_signal_ts)
                                 break
 
                         _diag_log_add({'ts': detect_time, 'symbol': symbol, 'tf': tf, 'master_px': master_px,
@@ -3644,6 +3713,11 @@ async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
         current = sym_state['trend_filter_type']
         if current == 'vwap': sym_state['trend_filter_type'] = 'ema'
         else: sym_state['trend_filter_type'] = 'vwap'
+        await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
+    elif d == 'gann_toggle_exec_mode':
+        order = ['instant', 'close', 'hybrid']
+        current = bot_state.get('gann_execution_mode', 'instant')
+        bot_state['gann_execution_mode'] = order[(order.index(current) + 1) % len(order)]
         await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
     elif d == 'gann_toggle_auto_trade':
         sym_state['auto_trade'] = not sym_state.get('auto_trade', False)
