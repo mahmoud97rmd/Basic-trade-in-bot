@@ -1270,7 +1270,7 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
                     for delay in (0, 1, 2):
                         if delay: await asyncio.sleep(delay)
                         try:
-                            positions = await _metaapi_conn.get_positions()
+                            positions = await _metaapi_conn.get_positions() if hasattr(_metaapi_conn, 'get_positions') else []
                             match = next((p for p in positions if str(p.get('id')) == trade_id), None)
                             if match and match.get('openPrice') is not None:
                                 real_fill_price = float(match['openPrice'])
