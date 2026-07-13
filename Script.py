@@ -191,7 +191,7 @@ async def _gann_tick_fire_check(symbol: str, live_px: float, feed_age_ms: float)
         entry_mode = sym_state['gann_entry_mode']
         exec_mode = bot_state.get('gann_execution_mode', 'instant')
         pv = SYMBOL_INFO[symbol]['pip_value']
-        spike_limit = bot_state.get('gann_spike_limit_pts', 20) * pv
+        spike_limit = bot_state.get('gann_spike_limit_pts', 10) * pv
         flt_type = sym_state['trend_filter_type']; ttf = sym_state['trend_timeframe']
         detect_time = datetime.now(timezone.utc)
 
