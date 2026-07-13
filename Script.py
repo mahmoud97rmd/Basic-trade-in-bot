@@ -191,7 +191,7 @@ async def _gann_tick_fire_check(symbol: str, live_px: float, feed_age_ms: float)
         entry_mode = sym_state['gann_entry_mode']
         exec_mode = bot_state.get('gann_execution_mode', 'instant')
         pv = SYMBOL_INFO[symbol]['pip_value']
-        spike_limit = bot_state.get('gann_spike_limit_pts', 10) * pv
+        spike_limit = bot_state.get('gann_spike_limit_pts', 20) * pv
         flt_type = sym_state['trend_filter_type']; ttf = sym_state['trend_timeframe']
         detect_time = datetime.now(timezone.utc)
 
@@ -652,7 +652,21 @@ bot_state: dict = {
     'prot_cycle_inval_pts': 200,
     'gann_anchor_tf': '1h',
     'prot_allow_multi_tf':    True,
+
+    # ── Broker/display time alignment ──
+    # Hours to add to raw UTC (from OANDA/MetaApi) to reach the broker's
+    # own server clock (what the user's MT5 terminal displays). Used to
+    # align "last closed anchor candle" boundary detection to the SAME
+    # wall-clock boundaries MT5 shows, not raw UTC ones. Default 3 =
+    # Damascus/EET-DST-style broker offset.
     'broker_time_offset': 3,
+
+    # ── Gann level calculation mode ──
+    # 'static_h1'   : classic behavior -- levels are (re)anchored only when
+    #                 a new anchor-tf (H1/H4) candle closes.
+    # 'dynamic_live': ignore candle closes; recompute levels every
+    #                 GANN_DYNAMIC_RECALC_MINUTES using the current live
+    #                 streamed price. Toggle in the Telegram protection menu.
     'gann_calculation_mode': 'static_h1',
 
     
@@ -674,8 +688,7 @@ DAM_OFF = timedelta(hours=3)
 def _utc_to_dam(dt) -> datetime:
     if isinstance(dt, pd.Timestamp): dt = dt.to_pydatetime()
     if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
-    offset = int(bot_state.get('broker_time_offset', 3))
-    return dt + timedelta(hours=offset)
+    return dt + DAM_OFF
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1024,14 +1037,38 @@ def _gann_calc_tpsl(symbol: str, entry: float, is_buy: bool, candles: list, tf: 
     if is_buy: return round(entry + tp_dist, prec), round(entry - sl_dist, prec)
     return round(entry - tp_dist, prec), round(entry + sl_dist, prec)
 
+def _last_closed_anchor_time_utc(anchor_hours: int, offset_hours: float, now_utc: datetime) -> datetime:
+    """UTC timestamp of the OPEN of the most recently fully-closed anchor-tf
+    bucket, computed against BROKER server time (UTC + broker_time_offset)
+    rather than raw UTC. For a whole-hour offset this makes no difference
+    to a 1h anchor (hourly boundaries land on the same instants in any
+    whole-hour-offset zone), but it matters for a 4h anchor: OANDA's raw-UTC
+    4h grid (00/04/08/12/16/20 UTC) is NOT the same set of instants as the
+    broker's UTC+offset 4h grid, so blindly trusting OANDA's own bucketing
+    can hand the bot a Gann anchor close that doesn't match what closes on
+    the user's MT5 terminal."""
+    broker_now = now_utc + timedelta(hours=offset_hours)
+    floored = broker_now.replace(minute=0, second=0, microsecond=0)
+    bucket_start_hour = (floored.hour // anchor_hours) * anchor_hours
+    bucket_start_broker = floored.replace(hour=bucket_start_hour)
+    return bucket_start_broker - timedelta(hours=offset_hours)
+
 async def _gann_fetch_last_closed_anchor(symbol: str) -> dict | None:
     anchor_tf = bot_state.get('gann_anchor_tf', '1h')
-    candles = await fetch_candles(symbol, anchor_tf, count=2)
+    anchor_hours = _anchor_hours()
+    offset = bot_state.get('broker_time_offset', 3)
+    target_close_utc = _last_closed_anchor_time_utc(anchor_hours, offset, datetime.now(timezone.utc))
+    # Fetch a small pad of extra candles (not just 2) since the broker-
+    # aligned boundary can fall a bucket or two behind OANDA's own most
+    # recent closed candle once the offset shifts the grid.
+    candles = await fetch_candles(symbol, anchor_tf, count=anchor_hours + 6)
     if not candles: return None
     candles = sorted(candles, key=lambda c: c['time'])
-    # fetch_candles already filters out incomplete (currently forming) candles!
-    # So candles[-1] is exactly the LAST CLOSED candle.
-    return candles[-1]
+    # Pick the newest candle whose close does not exceed the broker-aligned
+    # boundary -- NOT simply candles[-1], which is only correct when
+    # OANDA's raw-UTC grid happens to coincide with the broker's grid.
+    eligible = [c for c in candles if c['time'].to_pydatetime() <= target_close_utc]
+    return eligible[-1] if eligible else candles[-1]
 
 def _gann_fmt_levels_msg(symbol: str, close: float) -> str:
     sym_state = bot_state['symbol_state'][symbol]
@@ -1484,9 +1521,7 @@ def get_protection_keyboard() -> dict:
         [{'text': f"فلتر البيانات المتأخرة: {'✅' if bot_state.get('prot_stale_filter', True) else '🔴'}", 'callback_data': 'tg_prot_stale'}],
         [{'text': f"إطار مرجعي للجان (Anchor): {bot_state.get('gann_anchor_tf', '1h').upper()}", 'callback_data': 'tg_prot_anchor'}],
         [{'text': f"فلتر أوقات دمشق (07-09 | 13-14): {'✅' if bot_state.get('prot_dam_time_filter', True) else '🔴'}", 'callback_data': 'tg_prot_dam_time'}],
-        [{'text': '➖', 'callback_data': 'prot_dec_offset'},
-         {'text': f"Offset: +{bot_state.get('broker_time_offset', 3)}h", 'callback_data': 'ignore'},
-         {'text': '➕', 'callback_data': 'prot_inc_offset'}],
+        [{'text': f"حساب جان: {'⚡ حي (كل 5 دقائق)' if bot_state.get('gann_calculation_mode', 'static_h1') == 'dynamic_live' else '📌 كلاسيكي (H1/H4)'}", 'callback_data': 'tg_gann_calc_mode'}],
         [{'text': f'تكرار الصفقات (Multi-TF): {multi_tf}', 'callback_data': 'prot_toggle_multitf'}],
         [{'text': '🔙 رجوع للقائمة الرئيسية', 'callback_data': 'menu_main'}],
         [{'text': '🔙 رجوع لإعدادات جان', 'callback_data': 'menu_gann'}]
@@ -1609,9 +1644,6 @@ def get_gann_keyboard() -> dict:
         [{'text': '── TP / SL ──', 'callback_data': 'noop'}],
         [{'text': tps_lbl, 'callback_data': 'gann_toggle_tpsl'}],
     ]
-    calc_mode = bot_state.get('gann_calculation_mode', 'static_h1')
-    calc_text = "ديناميكي (كل 5د)" if calc_mode == 'dynamic_live' else "ثابت (إغلاق الشمعة)"
-    rows.append([{'text': f"وضع السلّم: {calc_text}", 'callback_data': 'gann_toggle_calc_mode'}])
 
     if tpsm == 'fixed':
         rows += [
@@ -2450,32 +2482,44 @@ async def gann_monitor_scanner() -> None:
 # PRO BACKTEST ENGINE (Macro Trend & Smart Break-Even)
 # ─────────────────────────────────────────────────────────────
 
+# Recalculation cadence for gann_calculation_mode == 'dynamic_live'. Shared
+# constant so the live scanner (gann_cycle_manager) and both backtest
+# engines (_build_gann_cycle_defs) use the exact same cadence -- required
+# for backtest/live parity.
+GANN_DYNAMIC_RECALC_MINUTES = 5
+
 async def gann_cycle_manager() -> None:
     c_log('Gann cycle manager started.')
     while True:
         try:
             now_utc = datetime.now(timezone.utc)
+            calc_mode = bot_state.get('gann_calculation_mode', 'static_h1')
             active_symbols = [s for s, on in bot_state['active_symbols'].items() if on]
             for symbol in active_symbols:
                 sym_state = bot_state['symbol_state'][symbol]
                 if not sym_state['gann_cycle_active']:
                     continue
-                    
-                calc_mode = bot_state.get('gann_calculation_mode', 'static_h1')
+
                 if calc_mode == 'dynamic_live':
-                    last_calc = sym_state.get('gann_dynamic_last_calc')
-                    if not last_calc or (now_utc - last_calc).total_seconds() >= 300:
-                        cache = _gann_cache.get(symbol)
-                        if cache:
-                            live_px = float(cache['close'])
-                            sym_state['gann_levels'] = gann_calc_levels(symbol, live_px)
-                            sym_state['gann_close_used'] = live_px
-                            sym_state['gann_last_h1_time'] = now_utc
-                            sym_state['gann_dynamic_last_calc'] = now_utc
-                            sym_state['gann_cycle_started_at'] = now_utc
-                            sym_state['gann_level_status'] = {}
+                    # Classic H1-close anchoring is bypassed entirely: levels
+                    # are recomputed every GANN_DYNAMIC_RECALC_MINUTES off the
+                    # current live streamed price. 'gann_cycle_started_at'
+                    # doubles as "last dynamic recalc timestamp" in this mode
+                    # (it's not otherwise load-bearing outside display/logging).
+                    last_recalc = sym_state['gann_cycle_started_at']
+                    if last_recalc and (now_utc - last_recalc).total_seconds() < GANN_DYNAMIC_RECALC_MINUTES * 60:
+                        continue
+                    live_px, _src, _age = await _lq_price_with_fallback(symbol)
+                    if live_px is None:
+                        continue
+                    sym_state['gann_levels'] = gann_calc_levels(symbol, live_px)
+                    sym_state['gann_close_used'] = live_px
+                    sym_state['gann_last_h1_time'] = now_utc
+                    sym_state['gann_cycle_started_at'] = now_utc
+                    sym_state['gann_level_status'] = {}
+                    c_log(f'[{symbol}] Dynamic Gann recalculation at live_px={live_px}')
                     continue
-                    
+
                 cycle_h = sym_state['gann_cycle_hours']
                 last_h1 = await _gann_fetch_last_closed_anchor(symbol)
                 
@@ -2579,6 +2623,47 @@ async def global_ledger_reconciliation() -> None:
 
         except Exception as e:
             log_exception('global_ledger_reconciliation main loop', e)
+
+def _build_gann_cycle_defs(sym_state: dict, valid_h1: list, mc_1m: list) -> list[dict]:
+    """Single source of truth for 'when do Gann levels get (re)anchored and
+    from what price', shared by BOTH backtest engines (run_gann_backtest and
+    run_live_twin_simulation) so a change to bot_state['gann_calculation_mode']
+    always simulates identically to what the live scanner (gann_cycle_manager)
+    actually does -- this is what satisfies the backtest/live parity
+    requirement, rather than keeping two separately-maintained copies of the
+    same logic that could silently drift apart.
+
+    Returns a list of {'t_start', 't_end', 'close'} dicts:
+      - static_h1   : one entry per closed anchor-tf candle (legacy/unchanged).
+      - dynamic_live: one entry every GANN_DYNAMIC_RECALC_MINUTES, priced off
+        the most recent 1m close at that instant -- the backtest's proxy for
+        "current live_px", since historical tick data isn't available.
+    """
+    mode = bot_state.get('gann_calculation_mode', 'static_h1')
+    cycle_h = sym_state['gann_cycle_hours']
+
+    if mode != 'dynamic_live':
+        out = []
+        for h1 in valid_h1:
+            t_start = h1['time'] + timedelta(hours=1)
+            out.append({'t_start': t_start, 't_end': t_start + timedelta(hours=cycle_h), 'close': float(h1['close'])})
+        return out
+
+    px_series = sorted(mc_1m, key=lambda c: c['time']) if mc_1m else []
+    if not px_series:
+        return []
+    out = []
+    bucket = px_series[0]['time'].floor(f'{GANN_DYNAMIC_RECALC_MINUTES}min')
+    last_t = px_series[-1]['time']
+    i = 0; n = len(px_series)
+    while bucket <= last_t:
+        while i + 1 < n and px_series[i + 1]['time'] <= bucket:
+            i += 1
+        if px_series[i]['time'] <= bucket:
+            out.append({'t_start': bucket, 't_end': bucket + timedelta(minutes=GANN_DYNAMIC_RECALC_MINUTES),
+                        'close': float(px_series[i]['close'])})
+        bucket += timedelta(minutes=GANN_DYNAMIC_RECALC_MINUTES)
+    return out
 
 async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
     global _bt_progress
@@ -2691,37 +2776,24 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
             
             trend_freq = '30min' if ttf == '30m' else '1h'
 
-            calc_mode = bot_state.get('gann_calculation_mode', 'static_h1')
-            if calc_mode == 'dynamic_live':
-                valid_1m = [c for c in mc_1m if start_ts <= c['time'].timestamp() <= end_ts]
-                pseudo_cycles = []
-                last_5m_ts = 0
-                for c1m in valid_1m:
-                    ts = c1m['time'].timestamp()
-                    if ts - last_5m_ts >= 300:
-                        pseudo_cycles.append(c1m)
-                        last_5m_ts = ts
-                cycles_to_run = pseudo_cycles
-                cycle_step_h = 5.0 / 60.0
-            else:
-                cycles_to_run = valid_h1
-                cycle_step_h = cycle_h
+            # gann_calculation_mode-aware: static_h1 walks closed anchor
+            # candles (legacy); dynamic_live recomputes every
+            # GANN_DYNAMIC_RECALC_MINUTES off 1m closes -- see
+            # _build_gann_cycle_defs docstring for why this is shared with
+            # run_live_twin_simulation instead of duplicated.
+            cycle_defs = _build_gann_cycle_defs(sym_state, valid_h1, mc_1m)
 
-            for idx, anchor_c in enumerate(cycles_to_run):
+            for idx, cdef in enumerate(cycle_defs):
                 if prog.cancelled: return
                 await asyncio.sleep(0)
-                if calc_mode == 'dynamic_live':
-                    t_start = anchor_c['time']
-                    t_end = t_start + timedelta(minutes=5)
-                else:
-                    t_start = anchor_c['time'] + timedelta(hours=1)
-                    t_end   = t_start + timedelta(hours=cycle_h)
-                close = float(anchor_c['close'])
+                t_start = cdef['t_start']
+                t_end   = cdef['t_end']
+                close   = cdef['close']
                 levels = gann_calc_levels(symbol, close)
                 f_mode = sym_state['gann_zone_filter']
                 active_lv = [l for l in levels if l['dir'] != 'ref' and (f_mode == 'all' or (f_mode == 'star' and l['star']) or (f_mode == 'star_fan' and (l['star'] or l['fan'])))]
                 
-                res['cycle_logs'].append({'symbol': symbol, 'time_ts': anchor_c['time'].timestamp(), 'time_dt': anchor_c['time'], 'close': close, 'levels': len(active_lv)})
+                res['cycle_logs'].append({'symbol': symbol, 'time_ts': t_start.timestamp(), 'time_dt': t_start, 'close': close, 'levels': len(active_lv)})
                 
                 level_used = set()
                 for btf, candles_m in monitor_tfs_data.items():
@@ -2776,7 +2848,7 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
                                 'time': bar_time, 'symbol': symbol, 'is_buy': is_buy, 'entry': entry,
                                 'tp_px': tp_px, 'sl_px': sl_px, 'sl_d': sl_d, 'tp_d': tp_d, 'be_trigger_px': be_trigger_px,
                                 'lot': lot, 'cs': cs, 'quote_conv': quote_conv, 'tf': btf, 'combo_key': combo_key,
-                                'cycle_time': h1['time'], 'cycle_close': close, 'level_key': k
+                                'cycle_time': t_start, 'cycle_close': close, 'level_key': k
                             })
                             level_used.add(combo_key)
         
@@ -3333,12 +3405,17 @@ async def run_live_twin_simulation(start_dt: datetime, end_dt: datetime) -> None
             valid_h1 = [c for c in candles_h1 if start_ts <= (c['time'].timestamp() + 3600) <= end_ts]
             trend_freq = '30min' if ttf == '30m' else '1h'
 
-            for h1 in valid_h1:
+            # Same shared builder as run_gann_backtest -- required so a
+            # 'dynamic_live' backtest here matches the idealized engine and
+            # the live scanner exactly instead of drifting from them.
+            cycle_defs = _build_gann_cycle_defs(sym_state, valid_h1, mc_1m)
+
+            for cdef in cycle_defs:
                 if prog.cancelled: return
                 await asyncio.sleep(0)
-                t_start = h1['time'] + timedelta(hours=1)
-                t_end = t_start + timedelta(hours=cycle_h)
-                close = float(h1['close'])
+                t_start = cdef['t_start']
+                t_end = cdef['t_end']
+                close = cdef['close']
                 levels = gann_calc_levels(symbol, close)
                 f_mode = sym_state['gann_zone_filter']
                 active_lv = [l for l in levels if l['dir'] != 'ref' and (f_mode == 'all' or (f_mode == 'star' and l['star']) or (f_mode == 'star_fan' and (l['star'] or l['fan'])))]
@@ -3415,7 +3492,7 @@ async def run_live_twin_simulation(start_dt: datetime, end_dt: datetime) -> None
                                 'time': bar_time, 'symbol': symbol, 'is_buy': is_buy, 'intended_entry': entry,
                                 'sl_d': sl_d, 'tp_d': tp_d, 'be_enabled': sym_state['break_even_enabled'],
                                 'lot': lot, 'cs': cs, 'quote_conv': quote_conv, 'tf': btf, 'combo_key': combo_key,
-                                'cycle_time': h1['time'], 'cycle_close': close, 'level_key': k,
+                                'cycle_time': t_start, 'cycle_close': close, 'level_key': k,
                             })
                             level_used.add(combo_key)
 
@@ -3953,28 +4030,28 @@ async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
             f"ملاحظة: مدة تجميد السلم (مدة المراقبة) لم تتغيّر — عدّلها يدوياً من أزرارها الخاصة لو حبيت."
         )
 
-    elif d == 'prot_dec_offset':
-        bot_state['broker_time_offset'] = max(0, int(bot_state.get('broker_time_offset', 3)) - 1)
-        await save_bot_persistence()
-        await _show(chat_id, msg_id, '🛡️ إعدادات الحماية:', get_protection_keyboard())
-    elif d == 'prot_inc_offset':
-        bot_state['broker_time_offset'] = min(12, int(bot_state.get('broker_time_offset', 3)) + 1)
-        await save_bot_persistence()
-        await _show(chat_id, msg_id, '🛡️ إعدادات الحماية:', get_protection_keyboard())
     elif d == 'tg_prot_dam_time':
-        bot_state['prot_dam_time_filter'] = not bool(bot_state.get('prot_dam_time_filter', True))
+        bot_state['prot_dam_time_filter'] = not bot_state.get('prot_dam_time_filter', True)
+        # Was previously never persisted -- the in-memory toggle worked
+        # immediately, but reverted to the default on any restart or reload,
+        # which looked exactly like "toggling does nothing."
         await save_bot_persistence()
         await _show(chat_id, msg_id, '🛡️ إعدادات الحماية:', get_protection_keyboard())
-    elif d == 'gann_toggle_calc_mode':
-        current = bot_state.get('gann_calculation_mode', 'static_h1')
-        new_mode = 'dynamic_live' if current == 'static_h1' else 'static_h1'
+
+    elif d == 'tg_gann_calc_mode':
+        new_mode = 'static_h1' if bot_state.get('gann_calculation_mode', 'static_h1') == 'dynamic_live' else 'dynamic_live'
         bot_state['gann_calculation_mode'] = new_mode
         for sym, ss in bot_state['symbol_state'].items():
+            # Force an immediate recompute on gann_cycle_manager's very next
+            # tick instead of waiting for whatever boundary the OLD mode
+            # would have used next -- matches the anchor-tf toggle's
+            # "revert immediately" behavior.
             ss['gann_last_h1_time'] = None
             ss['gann_cycle_started_at'] = None
-            ss['gann_dynamic_last_calc'] = None
         await save_bot_persistence()
-        await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
+        await _show(chat_id, msg_id, '🛡️ إعدادات الحماية:', get_protection_keyboard())
+        mode_lbl = '⚡ حي (Dynamic Live -- كل 5 دقائق حسب السعر اللحظي)' if new_mode == 'dynamic_live' else '📌 كلاسيكي (Static -- عند إغلاق شمعة الأنكر فقط)'
+        await send_tg_msg(f"✅ <b>وضع حساب جان: {mode_lbl}</b>\nسيتم تطبيق هذا فوراً في الدورة القادمة (~60 ثانية) وفي أي باكتيست جديد.")
 
     elif d == 'gann_show_levels':
         sym = bot_state['ui_selected_symbol']
