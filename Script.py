@@ -674,7 +674,8 @@ DAM_OFF = timedelta(hours=3)
 def _utc_to_dam(dt) -> datetime:
     if isinstance(dt, pd.Timestamp): dt = dt.to_pydatetime()
     if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
-    return dt + DAM_OFF
+    offset = int(bot_state.get('broker_time_offset', 3))
+    return dt + timedelta(hours=offset)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -842,8 +843,7 @@ async def fetch_candles(symbol: str, granularity_str: str, count: int = 5000, en
     collected = []; remaining = fetch_count
     headers = {'Authorization': f'Bearer {OANDA_TOKEN}', 'Content-Type':  'application/json'}
     url = f'{OANDA_BASE_URL}/instruments/{symbol}/candles'
-    offset = int(bot_state.get('broker_time_offset', 3))
-    current_end = end_time if end_time else (datetime.now(timezone.utc) + timedelta(hours=offset))
+    current_end = end_time if end_time else datetime.now(timezone.utc)
 
     sem = _get_oanda_sem()
     async with sem:
@@ -1609,6 +1609,9 @@ def get_gann_keyboard() -> dict:
         [{'text': '── TP / SL ──', 'callback_data': 'noop'}],
         [{'text': tps_lbl, 'callback_data': 'gann_toggle_tpsl'}],
     ]
+    calc_mode = bot_state.get('gann_calculation_mode', 'static_h1')
+    calc_text = "ديناميكي (كل 5د)" if calc_mode == 'dynamic_live' else "ثابت (إغلاق الشمعة)"
+    rows.append([{'text': f"وضع السلّم: {calc_text}", 'callback_data': 'gann_toggle_calc_mode'}])
 
     if tpsm == 'fixed':
         rows += [
@@ -2718,7 +2721,7 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
                 f_mode = sym_state['gann_zone_filter']
                 active_lv = [l for l in levels if l['dir'] != 'ref' and (f_mode == 'all' or (f_mode == 'star' and l['star']) or (f_mode == 'star_fan' and (l['star'] or l['fan'])))]
                 
-                res['cycle_logs'].append({'symbol': symbol, 'time_ts': h1['time'].timestamp(), 'time_dt': h1['time'], 'close': close, 'levels': len(active_lv)})
+                res['cycle_logs'].append({'symbol': symbol, 'time_ts': anchor_c['time'].timestamp(), 'time_dt': anchor_c['time'], 'close': close, 'levels': len(active_lv)})
                 
                 level_used = set()
                 for btf, candles_m in monitor_tfs_data.items():
