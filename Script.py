@@ -1569,6 +1569,7 @@ def get_gann_keyboard() -> dict:
         [{'text': '🛡️ إعدادات الحماية المتقدمة', 'callback_data': 'menu_protection'}],
         [{'text': f'📐 {sym} — دورة: {cyc}  |  صفقات: {open_n}', 'callback_data': 'noop'}],
         [{'text': '🔄 عرض الدعوم والمقاومات الحالية', 'callback_data': 'gann_show_levels'}],
+        [{'text': '🕯️ تشخيص: آخر 10 شموع (وقت + إغلاق)', 'callback_data': 'gann_show_last10'}],
     ]
     
     rows.append([{'text': '── أزواج التداول والباكتيست ──', 'callback_data': 'noop'}])
@@ -4068,6 +4069,42 @@ async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
             else:
                 await send_tg_msg('❌ تعذّر جلب البيانات.'); return
         await send_tg_msg(_gann_fmt_levels_msg(sym, bot_state['symbol_state'][sym]['gann_close_used']))
+        await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
+    elif d == 'gann_show_last10':
+        sym = bot_state['ui_selected_symbol']
+        anchor_tf = bot_state.get('gann_anchor_tf', '1h')
+        anchor_hours = _anchor_hours()
+        offset = bot_state.get('broker_time_offset', 3)
+        await send_tg_msg(f'⏳ جاري جلب آخر 10 شموع {_anchor_label()} لـ {sym} من اواندا...')
+        candles = await fetch_candles(sym, anchor_tf, count=10)
+        if not candles:
+            await send_tg_msg('❌ تعذّر جلب الشموع.')
+            return
+        candles = sorted(candles, key=lambda c: c['time'])[-10:]
+        # What the bot itself currently treats as "last closed" -- shown
+        # separately so a mismatch between this and the chart is obvious.
+        bot_pick = await _gann_fetch_last_closed_anchor(sym)
+        bot_pick_time = bot_pick['time'] if bot_pick else None
+
+        lines = [
+            f'🕯️ <b>آخر 10 شموع {_anchor_label()} — {sym}</b>',
+            f'(المصدر: OANDA | التوقيت المعروض: دمشق UTC+{offset} — وبين قوسين UTC الخام)',
+            ''
+        ]
+        for i, c in enumerate(candles, 1):
+            t_utc = c['time'].to_pydatetime()
+            t_dam_start = t_utc + timedelta(hours=offset)
+            t_dam_end = t_dam_start + timedelta(hours=anchor_hours)
+            t_utc_end = t_utc + timedelta(hours=anchor_hours)
+            marker = ' ✅ ← يعتمدها البوت الآن' if bot_pick_time and t_utc == bot_pick_time else ''
+            lines.append(
+                f"{i}) {t_dam_start.strftime('%m-%d %H:%M')} → {t_dam_end.strftime('%H:%M')} دمشق  "
+                f"({t_utc.strftime('%H:%M')}-{t_utc_end.strftime('%H:%M')} UTC)\n"
+                f"    إغلاق: {float(c['close']):.5f}{marker}"
+            )
+        if not bot_pick_time:
+            lines.append('\n⚠️ لم يتمكن البوت من تحديد آخر شمعة مغلقة حالياً.')
+        await send_tg_msg('\n'.join(lines))
         await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
     elif d == 'gann_toggle_entry':
         sym_state['gann_entry_mode'] = 'pure_touch' if sym_state['gann_entry_mode'] == 'touch_trend' else 'touch_trend'
