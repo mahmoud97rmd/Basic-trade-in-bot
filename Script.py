@@ -652,6 +652,8 @@ bot_state: dict = {
     'prot_cycle_inval_pts': 200,
     'gann_anchor_tf': '1h',
     'prot_allow_multi_tf':    True,
+    'broker_time_offset': 3,
+    'gann_calculation_mode': 'static_h1',
 
     
     
@@ -840,7 +842,8 @@ async def fetch_candles(symbol: str, granularity_str: str, count: int = 5000, en
     collected = []; remaining = fetch_count
     headers = {'Authorization': f'Bearer {OANDA_TOKEN}', 'Content-Type':  'application/json'}
     url = f'{OANDA_BASE_URL}/instruments/{symbol}/candles'
-    current_end = end_time if end_time else datetime.now(timezone.utc)
+    offset = int(bot_state.get('broker_time_offset', 3))
+    current_end = end_time if end_time else (datetime.now(timezone.utc) + timedelta(hours=offset))
 
     sem = _get_oanda_sem()
     async with sem:
@@ -1481,6 +1484,9 @@ def get_protection_keyboard() -> dict:
         [{'text': f"فلتر البيانات المتأخرة: {'✅' if bot_state.get('prot_stale_filter', True) else '🔴'}", 'callback_data': 'tg_prot_stale'}],
         [{'text': f"إطار مرجعي للجان (Anchor): {bot_state.get('gann_anchor_tf', '1h').upper()}", 'callback_data': 'tg_prot_anchor'}],
         [{'text': f"فلتر أوقات دمشق (07-09 | 13-14): {'✅' if bot_state.get('prot_dam_time_filter', True) else '🔴'}", 'callback_data': 'tg_prot_dam_time'}],
+        [{'text': '➖', 'callback_data': 'prot_dec_offset'},
+         {'text': f"Offset: +{bot_state.get('broker_time_offset', 3)}h", 'callback_data': 'ignore'},
+         {'text': '➕', 'callback_data': 'prot_inc_offset'}],
         [{'text': f'تكرار الصفقات (Multi-TF): {multi_tf}', 'callback_data': 'prot_toggle_multitf'}],
         [{'text': '🔙 رجوع للقائمة الرئيسية', 'callback_data': 'menu_main'}],
         [{'text': '🔙 رجوع لإعدادات جان', 'callback_data': 'menu_gann'}]
@@ -2452,6 +2458,21 @@ async def gann_cycle_manager() -> None:
                 if not sym_state['gann_cycle_active']:
                     continue
                     
+                calc_mode = bot_state.get('gann_calculation_mode', 'static_h1')
+                if calc_mode == 'dynamic_live':
+                    last_calc = sym_state.get('gann_dynamic_last_calc')
+                    if not last_calc or (now_utc - last_calc).total_seconds() >= 300:
+                        cache = _gann_cache.get(symbol)
+                        if cache:
+                            live_px = float(cache['close'])
+                            sym_state['gann_levels'] = gann_calc_levels(symbol, live_px)
+                            sym_state['gann_close_used'] = live_px
+                            sym_state['gann_last_h1_time'] = now_utc
+                            sym_state['gann_dynamic_last_calc'] = now_utc
+                            sym_state['gann_cycle_started_at'] = now_utc
+                            sym_state['gann_level_status'] = {}
+                    continue
+                    
                 cycle_h = sym_state['gann_cycle_hours']
                 last_h1 = await _gann_fetch_last_closed_anchor(symbol)
                 
@@ -2667,12 +2688,32 @@ async def run_gann_backtest(start_dt: datetime, end_dt: datetime) -> None:
             
             trend_freq = '30min' if ttf == '30m' else '1h'
 
-            for idx, h1 in enumerate(valid_h1):
+            calc_mode = bot_state.get('gann_calculation_mode', 'static_h1')
+            if calc_mode == 'dynamic_live':
+                valid_1m = [c for c in mc_1m if start_ts <= c['time'].timestamp() <= end_ts]
+                pseudo_cycles = []
+                last_5m_ts = 0
+                for c1m in valid_1m:
+                    ts = c1m['time'].timestamp()
+                    if ts - last_5m_ts >= 300:
+                        pseudo_cycles.append(c1m)
+                        last_5m_ts = ts
+                cycles_to_run = pseudo_cycles
+                cycle_step_h = 5.0 / 60.0
+            else:
+                cycles_to_run = valid_h1
+                cycle_step_h = cycle_h
+
+            for idx, anchor_c in enumerate(cycles_to_run):
                 if prog.cancelled: return
                 await asyncio.sleep(0)
-                t_start = h1['time'] + timedelta(hours=1)
-                t_end   = t_start + timedelta(hours=cycle_h)
-                close   = float(h1['close'])
+                if calc_mode == 'dynamic_live':
+                    t_start = anchor_c['time']
+                    t_end = t_start + timedelta(minutes=5)
+                else:
+                    t_start = anchor_c['time'] + timedelta(hours=1)
+                    t_end   = t_start + timedelta(hours=cycle_h)
+                close = float(anchor_c['close'])
                 levels = gann_calc_levels(symbol, close)
                 f_mode = sym_state['gann_zone_filter']
                 active_lv = [l for l in levels if l['dir'] != 'ref' and (f_mode == 'all' or (f_mode == 'star' and l['star']) or (f_mode == 'star_fan' and (l['star'] or l['fan'])))]
@@ -3909,9 +3950,28 @@ async def _handle_callback(d: str, chat_id: int, msg_id: int) -> None:
             f"ملاحظة: مدة تجميد السلم (مدة المراقبة) لم تتغيّر — عدّلها يدوياً من أزرارها الخاصة لو حبيت."
         )
 
-    elif d == 'tg_prot_dam_time':
-        bot_state['prot_dam_time_filter'] = not bot_state.get('prot_dam_time_filter', True)
+    elif d == 'prot_dec_offset':
+        bot_state['broker_time_offset'] = max(0, int(bot_state.get('broker_time_offset', 3)) - 1)
+        await save_bot_persistence()
         await _show(chat_id, msg_id, '🛡️ إعدادات الحماية:', get_protection_keyboard())
+    elif d == 'prot_inc_offset':
+        bot_state['broker_time_offset'] = min(12, int(bot_state.get('broker_time_offset', 3)) + 1)
+        await save_bot_persistence()
+        await _show(chat_id, msg_id, '🛡️ إعدادات الحماية:', get_protection_keyboard())
+    elif d == 'tg_prot_dam_time':
+        bot_state['prot_dam_time_filter'] = not bool(bot_state.get('prot_dam_time_filter', True))
+        await save_bot_persistence()
+        await _show(chat_id, msg_id, '🛡️ إعدادات الحماية:', get_protection_keyboard())
+    elif d == 'gann_toggle_calc_mode':
+        current = bot_state.get('gann_calculation_mode', 'static_h1')
+        new_mode = 'dynamic_live' if current == 'static_h1' else 'static_h1'
+        bot_state['gann_calculation_mode'] = new_mode
+        for sym, ss in bot_state['symbol_state'].items():
+            ss['gann_last_h1_time'] = None
+            ss['gann_cycle_started_at'] = None
+            ss['gann_dynamic_last_calc'] = None
+        await save_bot_persistence()
+        await _show(chat_id, msg_id, 'إعدادات جان:', get_gann_keyboard())
 
     elif d == 'gann_show_levels':
         sym = bot_state['ui_selected_symbol']
