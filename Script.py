@@ -118,6 +118,13 @@ live_quotes: dict[str, dict] = {}          # {'XAU_USD': {'bid':, 'ask':, 'mid':
 _broker_to_data_symbol: dict[str, str] = {}  # {'XAUUSD': 'XAU_USD', ...}
 _QUOTE_STALE_SECONDS = 5.0
 
+# Per-symbol cache refreshed periodically by gann_monitor_scanner (levels,
+# trend state, each enabled tf's closed-candle data). _gann_tick_fire_check
+# reads this on every price tick -- refreshing it doesn't need tick-level
+# freshness, only the live price checked against it does, and that now
+# always comes straight from the tick that triggered the check.
+_gann_cache: dict[str, dict] = {}
+
 
 class _GannPriceListener(SynchronizationListener):
     """Pushed quotes from MetaApi's streaming connection -- this is what
@@ -134,13 +141,116 @@ class _GannPriceListener(SynchronizationListener):
         bid = price.get('bid'); ask = price.get('ask')
         if bid is None or ask is None:
             return
-        live_quotes[data_sym] = {'bid': bid, 'ask': ask, 'mid': (bid + ask) / 2, 'ts': time.monotonic()}
+        mid = (bid + ask) / 2
+        live_quotes[data_sym] = {'bid': bid, 'ask': ask, 'mid': mid, 'ts': time.monotonic()}
+        # Event-driven touch detection: react to THIS tick right now, not on
+        # the next scanner cycle. create_task() so this callback returns
+        # immediately -- _gann_tick_fire_check does its own (awaited) I/O,
+        # but none of that blocks the SDK's socket message processing since
+        # it's a separate task, not inline in this callback.
+        asyncio.create_task(_gann_tick_fire_check(data_sym, mid, 0.0))
 
     async def on_connected(self, instance_index, replicas):
         c_log("MetaAPI streaming connection established (price feed live).")
 
     async def on_disconnected(self, instance_index):
         c_log("MetaAPI streaming connection lost -- reconnect loop will retry and resubscribe.")
+
+
+async def _gann_tick_fire_check(symbol: str, live_px: float, feed_age_ms: float) -> None:
+    """The actual touch decision, run the instant a new tick arrives (called
+    via create_task from _GannPriceListener.on_symbol_price_updated). Uses
+    whatever levels/trend/candle data gann_monitor_scanner's periodic
+    refresh last cached for this symbol in _gann_cache -- but the PRICE
+    checked against that data is always this exact tick, never a value
+    read back out of a timer loop. That's what makes firing on a stale
+    quote structurally impossible now, not just less likely."""
+    try:
+        if bot_state.get('connection_state') != CONN_RUNNING:
+            return
+        if bot_state.get('live_daily_hit'):
+            return
+        if bot_state.get('prot_dam_time_filter', True):
+            dam_time = (datetime.now(timezone.utc) + timedelta(hours=3)).time()
+            if any(start <= dam_time < end for start, end in _DAM_RESTRICTED_WINDOWS):
+                return
+
+        cache = _gann_cache.get(symbol)
+        if not cache:
+            return
+        sym_state = bot_state['symbol_state'][symbol]
+        if not sym_state['gann_cycle_active'] or not sym_state['gann_levels']:
+            return
+
+        max_concurrent = int(bot_state.get('prot_max_concurrent_trades', 4))
+        open_count = sum(1 for v in sym_state['gann_open_trades'].values() if isinstance(v, dict))
+        if open_count >= max_concurrent:
+            return
+
+        margin = cache['margin']; levels = cache['levels']; trend_up = cache['trend_up']
+        entry_mode = sym_state['gann_entry_mode']
+        exec_mode = bot_state.get('gann_execution_mode', 'instant')
+        pv = SYMBOL_INFO[symbol]['pip_value']
+        spike_limit = bot_state.get('gann_spike_limit_pts', 20) * pv
+        flt_type = sym_state['trend_filter_type']; ttf = sym_state['trend_timeframe']
+        detect_time = datetime.now(timezone.utc)
+
+        for tf in cache['enabled_tfs']:
+            if any(isinstance(v, dict) and v.get('tf') == tf for v in sym_state['gann_open_trades'].values()):
+                continue
+            tf_data = cache['tf_data'].get(tf)
+            if not tf_data:
+                continue
+            candles = tf_data['candles']; closed_close = tf_data['closed_close']
+
+            if entry_mode == 'touch_trend' and trend_up is None:
+                continue
+
+            for lv in levels:
+                k = lv['key']; dir_ = lv['dir']
+                combo_key = f"{k}_{tf}" if bot_state['prot_allow_multi_tf'] else k
+                if sym_state['gann_level_status'].get(combo_key) == 'used':
+                    continue
+                is_buy = (dir_ == 'dn')
+                if entry_mode == 'touch_trend':
+                    if is_buy and not trend_up: continue
+                    if not is_buy and trend_up: continue
+                if abs(live_px - lv['price']) > margin:
+                    continue
+
+                # ── Execution mode gate (unchanged semantics, tick-driven now) ──
+                if exec_mode == 'close':
+                    if abs(closed_close - lv['price']) > margin:
+                        continue
+                elif exec_mode == 'hybrid':
+                    if abs(live_px - closed_close) > spike_limit:
+                        continue
+                # instant: no further gate -- the margin check above is enough.
+
+                # ── Reserve the level NOW, synchronously ──
+                # asyncio only switches tasks at an `await`, so writing this
+                # before any await here is atomic with respect to every other
+                # concurrent tick's task -- a second tick arriving a
+                # microsecond later will see 'used' immediately, even though
+                # _gann_open_trade's own internal marking (further below,
+                # after several awaits of its own) hasn't happened yet. Without
+                # this, going event-driven (many concurrent per-tick tasks
+                # instead of one serial scanner loop) would let two
+                # near-simultaneous ticks both fire on the same level.
+                sym_state['gann_level_status'][combo_key] = 'used'
+
+                if flt_type == 'vwap': flt_label = f"VWAP={sym_state['trend_vwap_period']}\n"
+                elif flt_type == 'ema': flt_label = f"EMA={sym_state['trend_ema_period']}\n"
+                else: flt_label = "VWAP+EMA"
+                reason = f"لمس دعم 🟢 (مع {flt_label}_{ttf.upper()})" if is_buy else f"لمس مقاومة 🔴 (مع {flt_label}_{ttf.upper()})\n"
+
+                t1_signal_ts = time.monotonic()
+                await _gann_open_trade(symbol, is_buy, lv, candles, reason=reason, tf=tf,
+                                        initial_px=live_px, detect_time=detect_time, t1_signal_ts=t1_signal_ts,
+                                        feed_source='ws', feed_age_ms=feed_age_ms)
+                break  # one entry per (symbol, tf) per tick -- other enabled tfs can still fire independently
+    except Exception as e:
+        log_exception(f"_gann_tick_fire_check [{symbol}]", e)
 
 
 async def _lq_subscribe_symbol(symbol: str) -> None:
@@ -1071,6 +1181,11 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
         trade_id = f"sim_{int(datetime.now().timestamp())}_{tf}"
         real_msg = ""
         execution_failed = False
+        # Real fill price (as opposed to `price`, our pre-check estimate) --
+        # only ever populated for actual real orders below; stays None for
+        # simulated/paper trades, where `price` IS the fill by definition.
+        real_fill_price = None
+        fill_price_source = 'simulated'
 
         if is_real:
             # Source of truth: never spin up a second, ad-hoc MetaAPI
@@ -1141,6 +1256,32 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
                     # PnL every time, and mislabeled it as the real MT5 profit.
                     # positionId must be preferred here.
                     trade_id = str(res.get('positionId', res.get('orderId', trade_id)))
+
+                    # ── Real fill price, not our pre-check estimate ──
+                    # `price` (fresh_px) is what we THOUGHT we'd get filled at,
+                    # checked right before sending. The broker's actual fill
+                    # can differ (that's the whole slippage question this was
+                    # built to answer). res.get('price') is sometimes the
+                    # order's requested price, not a confirmed fill -- the
+                    # realized fill price lives on the resulting POSITION, so
+                    # query that directly. MetaApi's position sync can lag the
+                    # order response by a moment, so retry briefly before
+                    # falling back.
+                    for delay in (0, 1, 2):
+                        if delay: await asyncio.sleep(delay)
+                        try:
+                            positions = await _metaapi_conn.get_positions()
+                            match = next((p for p in positions if str(p.get('id')) == trade_id), None)
+                            if match and match.get('openPrice') is not None:
+                                real_fill_price = float(match['openPrice'])
+                                fill_price_source = 'confirmed_position'
+                                break
+                        except Exception as pe:
+                            log_exception(f"_gann_open_trade fill-price lookup [{symbol} {tf}]", pe)
+                    if real_fill_price is None and res.get('price') is not None:
+                        real_fill_price = float(res['price'])
+                        fill_price_source = 'order_response'
+
                     real_msg = "\n🚀 <b>تم فتح الصفقة حقيقياً على حسابك!</b>" + telemetry_lbl
                     _consecutive_real_order_failures = 0
                 except Exception as ex:
@@ -1192,17 +1333,34 @@ async def _gann_open_trade(symbol: str, is_buy: bool, level: dict, candles: list
             )
             return
 
+        # entry_final is what actually happened: the confirmed broker fill
+        # when we have one, our pre-check estimate otherwise (simulated
+        # trades, or a real trade where the position lookup above failed).
+        entry_final = real_fill_price if real_fill_price is not None else price
+
         bot_state['symbol_state'][symbol]['gann_open_trades'][trade_id] = {
-            'tf': tf, 'is_buy': is_buy, 'entry': price, 'is_real': is_real, 'sl': sl, 'tp': tp,
-            'be_trigger': (price + (tp - price)/2) if is_buy else (price - (price - tp)/2) # simplified BE trigger
+            'tf': tf, 'is_buy': is_buy, 'entry': entry_final, 'is_real': is_real, 'sl': sl, 'tp': tp,
+            'be_trigger': (entry_final + (tp - entry_final)/2) if is_buy else (entry_final - (entry_final - tp)/2) # simplified BE trigger
         }
         bot_state['symbol_state'][symbol]['gann_level_status'][level['key']] = 'used'
         await save_bot_persistence()
 
+        entry_note = {
+            'confirmed_position': ' (مؤكد من الوسيط)',
+            'order_response': ' (من استجابة الأمر)',
+            'simulated': '',
+        }.get(fill_price_source, ' (تقديري قبل التنفيذ — تعذّر تأكيد سعر الوسيط)')
+        slippage_line = ""
+        if is_real:
+            actual_slippage = abs(entry_final - level['price'])
+            pv = SYMBOL_INFO[symbol]['pip_value']
+            slippage_line = f"الانزلاق الفعلي عن المستوى: {actual_slippage:.2f} ({actual_slippage / pv:.1f} نقطة)\n"
+
         await send_tg_msg(
             f"<b>✅ {'BUY 📈' if is_buy else 'SELL 📉'} [{symbol} - جان {tf}]</b>  {reason}\n\n"
-            f"المستوى: {level['price']:.2f}  |  الدخول: {price:.2f}\n\n"
+            f"المستوى: {level['price']:.2f}  |  الدخول: {entry_final:.2f}{entry_note}\n\n"
             f"TP: {tp}  SL: {sl}  |  {tpsl_lbl}{be_lbl}\n"
+            f"{slippage_line}"
             f"إغلاق {_anchor_label()}: {bot_state['symbol_state'][symbol]['gann_close_used']:.5f}\n"
             f"{real_msg}"
         )
@@ -2181,50 +2339,33 @@ async def gann_monitor_scanner() -> None:
 
                     levels      = gann_active_levels(symbol)
                     margin      = sym_state['gann_touch_margin_pts'] * SYMBOL_INFO[symbol]['pip_value']
-
-                    # ── Single Source of Truth for the current price ──
-                    # Prefers the pushed MetaApi WebSocket quote (live_quotes,
-                    # populated by _GannPriceListener) -- an in-memory read,
-                    # no HTTP round-trip. Falls back to the OANDA REST poll
-                    # only if that feed is missing/stale, so a temporary
-                    # MetaApi hiccup degrades gracefully instead of blocking
-                    # all touch checks for this symbol. Fetched ONCE per
-                    # symbol per cycle and reused for every enabled timeframe
-                    # below, same as before -- per-tf candle closes are only
-                    # ever used for their own historical/ATR context.
-                    master_px, feed_source, feed_age_ms = await _lq_price_with_fallback(symbol)
-                    if master_px is None:
-                        continue
                     detect_time = datetime.now(timezone.utc)
 
-                    cap_warned_this_cycle = False
-
+                    # ── Event-driven touch detection (structural fix) ──
+                    # This block used to fetch a price and immediately check
+                    # it against every level/timeframe right here, once per
+                    # scan cycle -- which is exactly how a quote could sit
+                    # around for seconds before actually being acted on if
+                    # anything upstream (reconciliation, a slow OANDA call)
+                    # made this cycle run long.
+                    #
+                    # It no longer fires anything. It ONLY refreshes
+                    # _gann_cache[symbol] -- the levels, trend state, and
+                    # each enabled tf's closed-candle data. The actual touch
+                    # decision now happens inside _gann_tick_fire_check(),
+                    # invoked directly from _GannPriceListener.on_symbol_
+                    # price_updated the INSTANT a new tick arrives, using
+                    # that exact tick's price. There is no longer a "wait
+                    # for the next cycle to notice" step between a tick
+                    # landing and a decision being made -- acting on a stale
+                    # quote is no longer something a slow cycle can cause.
+                    #
+                    # Refreshing this cache on the existing ~cycle cadence is
+                    # fine: levels/trend/candle data doesn't need tick-level
+                    # freshness, only the live price used against it does,
+                    # and that now always comes straight from the tick.
+                    tf_data = {}
                     for tf in enabled_tfs:
-                        if any(isinstance(v, dict) and v.get('tf') == tf for v in sym_state['gann_open_trades'].values()) or tf in sym_state['gann_open_trades'].values():
-                            _diag_log_add({'ts': detect_time, 'symbol': symbol, 'tf': tf, 'master_px': master_px,
-                                           'skip_reason': 'already_open_on_this_tf'})
-                            continue 
-
-                        # ── Max concurrent trades cap (per symbol) ──
-                        # A single level touch used to be able to open one trade
-                        # PER enabled timeframe (e.g. 8 simultaneous BUYs off one
-                        # support touch). Cap the damage: once this symbol has
-                        # `prot_max_concurrent_trades` trades open, stop scanning
-                        # further timeframes for it THIS CYCLE. Already-open
-                        # trades are left alone; nothing is force-closed.
-                        max_concurrent = int(bot_state.get('prot_max_concurrent_trades', 4))
-                        open_count = sum(1 for v in sym_state['gann_open_trades'].values() if isinstance(v, dict))
-                        if open_count >= max_concurrent:
-                            if not cap_warned_this_cycle:
-                                await send_tg_msg(
-                                    f"⏸️ <b>[{symbol}]</b> تم بلوغ الحد الأقصى ({max_concurrent} صفقات مفتوحة) — "
-                                    f"تم تجاهل باقي الفريمات لهذه الدورة (الصفقات المفتوحة لم تُغلق)."
-                                )
-                                cap_warned_this_cycle = True
-                            _diag_log_add({'ts': detect_time, 'symbol': symbol, 'tf': tf, 'master_px': master_px,
-                                           'skip_reason': f'max_concurrent_cap_reached({open_count}>={max_concurrent})'})
-                            break
-
                         need = sym_state['gann_atr_period'] + 50
                         candles = await fetch_candles(symbol, tf, count=need)
                         if not candles or len(candles) < 3:
@@ -2233,93 +2374,40 @@ async def gann_monitor_scanner() -> None:
                             # that can make a whole batch of timeframes go quiet
                             # with zero visibility. Now at least it's captured in
                             # the diagnostic log for /export_diag_excel.
-                            _diag_log_add({'ts': detect_time, 'symbol': symbol, 'tf': tf, 'master_px': master_px,
+                            _diag_log_add({'ts': detect_time, 'symbol': symbol, 'tf': tf,
                                            'skip_reason': f'insufficient_oanda_candles(got={len(candles) if candles else 0})'})
                             continue
-                        live_px = master_px  # unified real-time price, NOT candles[-1]['close']
+                        tf_data[tf] = {'candles': candles, 'closed_close': float(candles[-1]['close'])}
 
-                        trend_up = True
-                        if sym_state['gann_entry_mode'] == 'touch_trend':
-                            if macro_trend_up is None:
-                                _diag_log_add({'ts': detect_time, 'symbol': symbol, 'tf': tf, 'master_px': master_px,
-                                               'skip_reason': 'trend_undetermined(insufficient_trend_tf_data)'})
-                                continue 
-                            trend_up = macro_trend_up
+                    _gann_cache[symbol] = {
+                        'levels': levels, 'margin': margin, 'trend_up': macro_trend_up,
+                        'enabled_tfs': list(tf_data.keys()), 'tf_data': tf_data,
+                        'refreshed_at': detect_time,
+                    }
 
-                        # Nearest trend-compatible level + distance, logged every
-                        # cycle regardless of outcome -- this is what lets
-                        # /export_diag_excel answer "was there ever a real,
-                        # trend-compatible, in-margin opportunity we missed?"
-                        directional_levels = [l for l in levels if (l['dir'] == 'dn') == trend_up] if sym_state['gann_entry_mode'] == 'touch_trend' else levels
+                    # Diagnostics: same visibility as before (nearest compatible
+                    # level + distance, whether it was in margin) -- computed
+                    # off the last WS quote for logging purposes only. This
+                    # block no longer decides anything; it just reports.
+                    q = live_quotes.get(symbol)
+                    diag_px = q['mid'] if q else None
+                    if diag_px is not None:
+                        entry_mode = sym_state['gann_entry_mode']
+                        directional_levels = (
+                            [l for l in levels if (l['dir'] == 'dn') == macro_trend_up]
+                            if entry_mode == 'touch_trend' and macro_trend_up is not None else levels
+                        )
                         nearest_dist = None; nearest_price = None
                         for l in directional_levels:
-                            d = abs(live_px - l['price'])
+                            d = abs(diag_px - l['price'])
                             if nearest_dist is None or d < nearest_dist:
                                 nearest_dist = d; nearest_price = l['price']
-
-                        exec_mode = bot_state.get('gann_execution_mode', 'instant')
-                        touch_attempted = False
-                        for lv in levels:
-                            k = lv['key']; dir = lv['dir']
-                            combo_key = f"{k}_{tf}" if bot_state['prot_allow_multi_tf'] else k
-                            status = sym_state['gann_level_status'].get(combo_key)
-                            if status == 'used': continue
-
-                            is_buy = (dir == 'dn')
-                        
-                            if sym_state['gann_entry_mode'] == 'touch_trend':
-                                if is_buy and not trend_up: continue
-                                if not is_buy and trend_up: continue
-
-                            if abs(live_px - lv['price']) <= margin:
-                                # ── Execution mode gate ──
-                                # instant (default, unchanged behavior): fire now on live_px touch.
-                                # close: only fire if this tf's last CLOSED candle is itself within
-                                #        margin -- waits out the current candle instead of chasing
-                                #        a live tick that might reverse before it closes.
-                                # hybrid: fire on live_px touch like instant, but block if live_px
-                                #         has already run away from the last closed candle's close
-                                #         by more than the spike limit (chasing-a-spike protection).
-                                # A gated attempt does NOT mark the level 'used' -- it's simply
-                                # re-checked next cycle, same as if no touch had happened at all.
-                                gate_ok = True; gate_reason = None
-                                if exec_mode == 'close':
-                                    closed_close = float(candles[-1]['close'])
-                                    if abs(closed_close - lv['price']) > margin:
-                                        gate_ok = False
-                                        gate_reason = f'close_mode_wait(closed_close={closed_close:.2f} outside margin of level {lv["price"]:.2f})'
-                                elif exec_mode == 'hybrid':
-                                    prev_close = float(candles[-1]['close'])
-                                    spike_limit = bot_state.get('gann_spike_limit_pts', 20) * SYMBOL_INFO[symbol]['pip_value']
-                                    momentum = abs(live_px - prev_close)
-                                    if momentum > spike_limit:
-                                        gate_ok = False
-                                        gate_reason = f'hybrid_spike_blocked(momentum={momentum:.3f} > limit={spike_limit:.3f})'
-
-                                if not gate_ok:
-                                    _diag_log_add({'ts': detect_time, 'symbol': symbol, 'tf': tf, 'master_px': master_px,
-                                                   'skip_reason': gate_reason})
-                                    continue
-
-                                if flt_type == 'vwap': flt_label = f"VWAP={sym_state['trend_vwap_period']}\n"
-                                elif flt_type == 'ema': flt_label = f"EMA={sym_state['trend_ema_period']}\n"
-                                else: flt_label = f"VWAP+EMA"
-                            
-                                reason = f"لمس دعم 🟢 (مع {flt_label}_{ttf.upper()})" if is_buy else f"لمس مقاومة 🔴 (مع {flt_label}_{ttf.upper()})\n"
-                                touch_attempted = True
-                                t1_signal_ts = time.monotonic()
-                                await _gann_open_trade(symbol, is_buy, lv, candles, reason=reason, tf=tf,
-                                                        initial_px=master_px, detect_time=detect_time, t1_signal_ts=t1_signal_ts,
-                                                        feed_source=feed_source, feed_age_ms=feed_age_ms)
-                                break
-
-                        _diag_log_add({'ts': detect_time, 'symbol': symbol, 'tf': tf, 'master_px': master_px,
-                                       'trend_up': trend_up, 'margin': margin,
+                        _diag_log_add({'ts': detect_time, 'symbol': symbol, 'master_px': diag_px,
+                                       'trend_up': macro_trend_up, 'margin': margin,
                                        'nearest_compatible_level': nearest_price, 'nearest_dist': nearest_dist,
                                        'within_margin': (nearest_dist is not None and nearest_dist <= margin),
-                                       'touch_attempted': touch_attempted,
-                                       'skip_reason': None if touch_attempted else 'no_qualifying_touch_this_cycle'})
-                            
+                                       'skip_reason': 'cache_refresh_only(firing_is_now_tick_driven)'})
+
                 except Exception as sym_exc:
                     log_exception(f"gann_monitor_scanner per-symbol [{symbol}]", sym_exc)
                     now_mono_sym = time.monotonic()
